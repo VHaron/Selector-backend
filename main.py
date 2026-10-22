@@ -41,6 +41,7 @@ SETTINGS_FILE = get_db_path("settings_db.json")
 NOTES_FILE = get_db_path("notes_db.json")
 SESSIONS_HISTORY_FILE = get_db_path("sessions_history_db.json")
 GRID_FILE = get_db_path("grid_db.json")
+BALANCES_FILE = get_db_path("balances_db.json")
 
 def load_json_db(file_path):
     if os.path.exists(file_path):
@@ -59,6 +60,7 @@ user_settings = load_json_db(SETTINGS_FILE)
 user_notes = load_json_db(NOTES_FILE)
 user_sessions_history = load_json_db(SESSIONS_HISTORY_FILE)
 user_grid = load_json_db(GRID_FILE)
+user_balances = load_json_db(BALANCES_FILE)
 
 ROOMS = {
     '888Poker': '244', 'Chico': '245', 'GGNetwork': '246',
@@ -85,20 +87,24 @@ class FiltersRequest(BaseAuthReq):
 
 class PresetData(BaseModel): name: str; items: List[Dict[str, Any]]
 class SavePresetsRequest(BaseAuthReq): presets: List[PresetData]
-class SaveSettingsRequest(BaseAuthReq): selected_rooms: list[str]
+class SaveSettingsRequest(BaseAuthReq):
+    selected_rooms: list[str]
+    active_formats: dict = {"isPko": True, "isFreezeout": True, "isTurbo": True}
+    is_compact: bool = False
+    sort_order: str = "time"
 class SaveNotesRequest(BaseAuthReq): notes: dict
 class SessionData(BaseModel): id: str; date: str; total_buyin: float; total_cashes: float; profit: float; tournaments_count: int
 class SaveSessionHistoryRequest(BaseAuthReq): session_data: SessionData
 class ClearSessionHistoryRequest(BaseAuthReq): pass
+class SaveGridRequest(BaseAuthReq): grid: List[Dict[str, Any]]
+class SaveBalancesRequest(BaseAuthReq): balances: Dict[str, float]
 
 def format_date_for_target(dt_str: str) -> str:
     if not dt_str: return ""
     try:
-        # Убираем 'T' если есть, и разбиваем по пробелу
         clean_str = dt_str.replace("T", " ")
         date_part, time_part = clean_str.split(" ")
         y, m, d = date_part.split("-")
-        # Собираем формат ДД.ММ.ГГГГ ЧЧ:ММ:СС (как любит Глобус)
         return f"{d}.{m}.{y} {time_part}"
     except: 
         return dt_str.replace("T", " ")
@@ -141,7 +147,7 @@ def verify_mfa(req: MFARequest):
         return {"status": "success"}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
-# === ПРОФИЛЬ (Шаблоны, Настройки, Заметки, Статистика) ===
+# === ПРОФИЛЬ (Шаблоны, Настройки, Заметки, Статистика, Сетка, Балансы) ===
 @app.post("/api/get_presets")
 def get_presets(req: BaseAuthReq): return {"status": "success", "presets": user_presets.get(get_user(req.session_token), [])}
 @app.post("/api/save_presets")
@@ -150,13 +156,26 @@ def save_presets(req: SavePresetsRequest):
     save_json_db(PRESETS_FILE, user_presets); return {"status": "success"}
 
 @app.post("/api/get_settings")
-def get_settings(req: BaseAuthReq): return {"status": "success", "selected_rooms": user_settings.get(get_user(req.session_token), {}).get("selected_rooms", list(ROOMS.values()))}
+def get_settings(req: BaseAuthReq):
+    u_settings = user_settings.get(get_user(req.session_token), {})
+    return {
+        "status": "success", 
+        "selected_rooms": u_settings.get("selected_rooms", list(ROOMS.values())),
+        "active_formats": u_settings.get("active_formats", {"isPko": True, "isFreezeout": True, "isTurbo": True}),
+        "is_compact": u_settings.get("is_compact", False),
+        "sort_order": u_settings.get("sort_order", "time")
+    }
+
 @app.post("/api/save_settings")
 def save_settings(req: SaveSettingsRequest):
     u = get_user(req.session_token)
     if u not in user_settings: user_settings[u] = {}
     user_settings[u]["selected_rooms"] = req.selected_rooms
-    save_json_db(SETTINGS_FILE, user_settings); return {"status": "success"}
+    user_settings[u]["active_formats"] = req.active_formats
+    user_settings[u]["is_compact"] = req.is_compact
+    user_settings[u]["sort_order"] = req.sort_order
+    save_json_db(SETTINGS_FILE, user_settings)
+    return {"status": "success"}
 
 @app.post("/api/get_notes")
 def get_notes(req: BaseAuthReq): return {"status": "success", "notes": user_notes.get(get_user(req.session_token), {})}
@@ -180,18 +199,23 @@ def clear_sessions_history(req: ClearSessionHistoryRequest):
     user_sessions_history[u] = []
     save_json_db(SESSIONS_HISTORY_FILE, user_sessions_history)
     return {"status": "success"}
-    
-class SaveGridRequest(BaseAuthReq):
-    grid: List[Dict[str, Any]]
 
 @app.post("/api/get_grid")
 def get_grid(req: BaseAuthReq):
     return {"status": "success", "grid": user_grid.get(get_user(req.session_token), [])}
-
 @app.post("/api/save_grid")
 def save_grid(req: SaveGridRequest):
     user_grid[get_user(req.session_token)] = req.grid
     save_json_db(GRID_FILE, user_grid)
+    return {"status": "success"}
+
+@app.post("/api/get_balances")
+def get_balances(req: BaseAuthReq):
+    return {"status": "success", "balances": user_balances.get(get_user(req.session_token), {})}
+@app.post("/api/save_balances")
+def save_balances(req: SaveBalancesRequest):
+    user_balances[get_user(req.session_token)] = req.balances
+    save_json_db(BALANCES_FILE, user_balances)
     return {"status": "success"}
 
 # === ТУРНИРЫ ===
