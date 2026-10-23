@@ -14,6 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any
 
+# force deploy
+
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8853116642:AAHCRMXQXowMsN9BdMShfxWltWqspo2pY1A")
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
