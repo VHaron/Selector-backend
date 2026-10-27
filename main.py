@@ -263,13 +263,14 @@ def fetch_tournaments(filters: FiltersRequest):
                 room_text = cols[0].text.strip()
                 if 'Ничего не найдено' in room_text: continue
                 
-                # Жестко определяем правильное имя рума по переданному в запросе ID сети
+                # Определяем PS(ES) и PS(COM) по фактическому названию из парсера, а не по фильтрам
                 room = room_text
-                if 'pokerstars' in room_text.lower() or 'ps' in room_text.lower():
-                    if '250' in filters.rooms:
-                        room = "PS(ES)"
-                    else:
-                        room = "PS(COM)"
+                room_lower = room_text.lower()
+                
+                if 'es' in room_lower or 'fr' in room_lower or 'pt' in room_lower or 'ps(es)' in room_lower:
+                    room = "PS(ES)"
+                elif 'pokerstars' in room_lower or 'ps' in room_lower:
+                    room = "PS(COM)"
 
                 roi = cols[6].text.strip()
                 try: roi_val = float(roi.replace('%', '').replace(',', '.').strip()); roi_str = f"+{roi_val}%" if roi_val > 0 else f"{roi_val}%"
