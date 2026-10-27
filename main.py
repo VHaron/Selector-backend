@@ -263,12 +263,12 @@ def fetch_tournaments(filters: FiltersRequest):
                 room_text = cols[0].text.strip()
                 if 'Ничего не найдено' in room_text: continue
                 
-                # Жестко определяем имя и валюту по ID сети, прилетевшему в запросе
+                # Жестко определяем правильное имя рума по переданному в запросе ID сети
                 room = room_text
-                if 'pokerstars' in room_text.lower() or 'ps' in room_text.lower() or room_text.startswith('PS'):
+                if 'pokerstars' in room_text.lower() or 'ps' in room_text.lower():
                     if '250' in filters.rooms:
                         room = "PS(ES)"
-                    elif '249' in filters.rooms:
+                    else:
                         room = "PS(COM)"
 
                 roi = cols[6].text.strip()
@@ -277,7 +277,8 @@ def fetch_tournaments(filters: FiltersRequest):
                 
                 tournaments.append({
                     'id': f"{cols[5].text.strip()}_{cols[1].text.strip()}",
-                    'room': room, 'name': cols[1].text.strip(), 'priority': cols[2].text.strip(),
+                    'room': room,  # теперь сюда улетит точное имя PS(ES) или PS(COM)
+                    'name': cols[1].text.strip(), 'priority': cols[2].text.strip(),
                     'buyin': cols[3].text.strip(), 'reentry': cols[4].text.strip(),
                     'time_start': cols[5].text.strip(), 'roi_str': roi_str, 'ev_mtt': cols[7].text.strip(),
                     'day_week': cols[8].text.strip(), 'duration': cols[10].text.strip(),
