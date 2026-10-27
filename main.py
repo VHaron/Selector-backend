@@ -68,7 +68,7 @@ ROOMS = {
     '888Poker': '244', 'Chico': '245', 'GGNetwork': '246',
     'iPoker': '247', 'PartyPoker': '248', 'PokerStars': '249',
     'PokerStars(FR-ES-PT)': '250', 'Winamax.fr': '251', 'WPN': '252',
-    'Pokerdom': '264', 'RPTBet': '262', 'CoinPoker': '265'
+    'Pokerdom': '264', 'WPTGLobal': '266', 'CoinPoker': '265'
 }
 
 # === СХЕМЫ ===
