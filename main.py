@@ -260,12 +260,16 @@ def fetch_tournaments(filters: FiltersRequest):
         for row in target_table.find_all('tr')[1:]:
             cols = row.find_all('td')
             if len(cols) >= 13:
-                room = cols[0].text.strip()
-                if 'Ничего не найдено' in room: continue
+                room_text = cols[0].text.strip()
+                if 'Ничего не найдено' in room_text: continue
                 
-                # Принудительно меняем PS(COM) на PS(ES), если в фильтрах был выбран ID 250
-                if '250' in filters.rooms and ('pokerstars' in room.lower() or 'ps' in room.lower()):
-                    room = "PS(ES)"
+                # Точное разделение румов в зависимости от выбранного ID в фильтре
+                room = room_text
+                if 'pokerstars' in room_text.lower() or 'ps' in room_text.lower():
+                    if '250' in filters.rooms:
+                        room = "PS(ES)"
+                    elif '249' in filters.rooms:
+                        room = "PS(COM)"
 
                 roi = cols[6].text.strip()
                 try: roi_val = float(roi.replace('%', '').replace(',', '.').strip()); roi_str = f"+{roi_val}%" if roi_val > 0 else f"{roi_val}%"
