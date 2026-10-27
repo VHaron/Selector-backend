@@ -263,9 +263,9 @@ def fetch_tournaments(filters: FiltersRequest):
                 room_text = cols[0].text.strip()
                 if 'Ничего не найдено' in room_text: continue
                 
-                # Точное разделение румов в зависимости от выбранного ID в фильтре
+                # Жестко определяем имя и валюту по ID сети, прилетевшему в запросе
                 room = room_text
-                if 'pokerstars' in room_text.lower() or 'ps' in room_text.lower():
+                if 'pokerstars' in room_text.lower() or 'ps' in room_text.lower() or room_text.startswith('PS'):
                     if '250' in filters.rooms:
                         room = "PS(ES)"
                     elif '249' in filters.rooms:
