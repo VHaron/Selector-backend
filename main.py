@@ -262,9 +262,15 @@ def fetch_tournaments(filters: FiltersRequest):
             if len(cols) >= 13:
                 room = cols[0].text.strip()
                 if 'Ничего не найдено' in room: continue
+                
+                # Принудительно меняем PS(COM) на PS(ES), если в фильтрах был выбран ID 250
+                if '250' in filters.rooms and ('pokerstars' in room.lower() or 'ps' in room.lower()):
+                    room = "PS(ES)"
+
                 roi = cols[6].text.strip()
                 try: roi_val = float(roi.replace('%', '').replace(',', '.').strip()); roi_str = f"+{roi_val}%" if roi_val > 0 else f"{roi_val}%"
                 except: roi_str = f"{roi}%" if '%' not in roi else roi
+                
                 tournaments.append({
                     'id': f"{cols[5].text.strip()}_{cols[1].text.strip()}",
                     'room': room, 'name': cols[1].text.strip(), 'priority': cols[2].text.strip(),
