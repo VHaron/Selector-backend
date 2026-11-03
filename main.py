@@ -31,10 +31,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = FastAPI(title="MVP Selector API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# === БАЗЫ ДАННЫХ ===
+# === БАЗЫ ДАННЫХ (в JSON) ===
 sessions: dict[str, requests.Session] = {}
 session_to_user: dict[str, str] = {} 
-session_to_domain: dict[str, str] = {} 
 
 def get_db_path(filename):
     return f"/data/{filename}" if os.path.exists("/data") else filename
@@ -65,22 +64,12 @@ user_sessions_history = load_json_db(SESSIONS_HISTORY_FILE)
 user_grid = load_json_db(GRID_FILE)
 user_balances = load_json_db(BALANCES_FILE)
 
-# Словари румов для разных доменов
-OLD_ROOMS = {
+ROOMS = {
     '888Poker': '244', 'Chico': '245', 'GGNetwork': '246',
     'iPoker': '247', 'PartyPoker': '248', 'PokerStars': '249',
     'PokerStars(FR-ES-PT)': '250', 'Winamax.fr': '251', 'WPN': '252',
     'Pokerdom': '264', 'WPTGLobal': '266', 'CoinPoker': '265'
 }
-
-NEW_ROOMS = {
-    '888Poker': '421', 'Chico': '422', 'GGNetwork': '423',
-    'iPoker': '424', 'PartyPoker': '425', 'PokerStars': '426',
-    'PokerStars(FR-ES-PT)': '427', 'Winamax.fr': '428', 'WPN': '429',
-    'Pokerdom': '430', 'WPTGLobal': '431', 'CoinPoker': '432'
-}
-
-ROOMS = NEW_ROOMS # дефолт
 
 # === СХЕМЫ ===
 class BaseAuthReq(BaseModel): session_token: str
@@ -114,20 +103,13 @@ class SaveBalancesRequest(BaseAuthReq): balances: Dict[str, float]
 
 def format_date_for_target(dt_str: str) -> str:
     if not dt_str: return ""
-    if "T" in dt_str: return dt_str.strip()
     try:
-        clean_str = dt_str.strip()
-        if "." in clean_str:
-            parts = clean_str.split(" ")
-            date_part = parts[0]
-            time_part = parts[1] if len(parts) > 1 else "00:00"
-            if len(time_part.split(":")) == 2:
-                time_part += ":00"
-            d, m, y = date_part.split(".")
-            return f"{y}-{m}-{d}T{time_part}"
-        return clean_str
-    except:
-        return dt_str
+        clean_str = dt_str.replace("T", " ")
+        date_part, time_part = clean_str.split(" ")
+        y, m, d = date_part.split("-")
+        return f"{d}.{m}.{y} {time_part}"
+    except: 
+        return dt_str.replace("T", " ")
 
 def get_user(token: str):
     if token not in sessions: raise HTTPException(status_code=401, detail="Сессия не найдена.")
@@ -138,67 +120,36 @@ def get_user(token: str):
 # === ЭНДПОИНТЫ АВТОРИЗАЦИИ ===
 @app.post("/api/login")
 def login(req: LoginRequest):
-    NEW_DOMAIN = "https://globusmvp.co" 
-    OLD_DOMAIN = "https://globusgo.pro"
-
-    def attempt_login(base_url):
-        u_session = requests.Session()
-        u_session.verify = False 
-        u_session.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': f'{base_url}/site/login'})
-        try:
-            resp = u_session.get(f"{base_url}/site/login", timeout=10)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            csrf_input = soup.find('input', {'name': '_csrf-backend'})
-            if not csrf_input: return None, None
-            
-            post_resp = u_session.post(f"{base_url}/site/login", data={
-                '_csrf-backend': csrf_input.get('value'), 
-                'LoginForm[username]': req.username, 
-                'LoginForm[password]': req.password, 
-                'LoginForm[rememberMe]': '1'
-            }, timeout=10)
-            return u_session, post_resp
-        except:
-            return None, None
-
-    active_session, post_response = attempt_login(NEW_DOMAIN)
-    active_domain = NEW_DOMAIN
-
-    if not post_response or post_response.url == f"{NEW_DOMAIN}/site/login":
-        active_session, post_response = attempt_login(OLD_DOMAIN)
-        active_domain = OLD_DOMAIN
-
-    if not post_response or post_response.url == f"{active_domain}/site/login":
-        raise HTTPException(status_code=401, detail="Неверный логин")
+    user_session = requests.Session()
+    user_session.verify = False 
+    user_session.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': 'https://globusgo.pro/site/login'})
+    try:
+        response = user_session.get("https://globusgo.pro/site/login")
+        soup = BeautifulSoup(response.text, 'html.parser')
+        csrf_value = soup.find('input', {'name': '_csrf-backend'}).get('value')
+        post_response = user_session.post("https://globusgo.pro/site/login", data={'_csrf-backend': csrf_value, 'LoginForm[username]': req.username, 'LoginForm[password]': req.password, 'LoginForm[rememberMe]': '1'})
+        token = str(uuid.uuid4())
+        sessions[token] = user_session
+        session_to_user[token] = req.username
         
-    token = str(uuid.uuid4())
-    sessions[token] = active_session
-    session_to_user[token] = req.username
-    session_to_domain[token] = active_domain  
-    
-    if "mfa" in post_response.url.lower(): 
-        return {"status": "mfa_required", "session_token": token}
-    else: 
-        return {"status": "success", "session_token": token}
+        if post_response.url == "https://globusgo.pro/site/login": raise HTTPException(status_code=401, detail="Неверный логин")
+        elif "mfa" in post_response.url.lower(): return {"status": "mfa_required", "session_token": token}
+        else: return {"status": "success", "session_token": token}
+    except HTTPException: raise
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/mfa")
 def verify_mfa(req: MFARequest):
     user_session = sessions.get(req.session_token)
-    base_domain = session_to_domain.get(req.session_token, "https://globusmvp.co")
-    
     try:
-        response = user_session.get(f"{base_domain}/site/mfa-verify")
+        response = user_session.get("https://globusgo.pro/site/mfa-verify")
         csrf_value = BeautifulSoup(response.text, 'html.parser').find('input', {'name': '_csrf-backend'}).get('value')
-        post_response = user_session.post(f"{base_domain}/site/mfa-verify", data={
-            '_csrf-backend': csrf_value, 
-            'OtpForm[otp]': req.otp
-        })
-        if post_response.url == f"{base_domain}/site/mfa-verify": 
-            raise HTTPException(status_code=401, detail="Неверный код 2FA")
+        post_response = user_session.post("https://globusgo.pro/site/mfa-verify", data={'_csrf-backend': csrf_value, 'OtpForm[otp]': req.otp})
+        if post_response.url == "https://globusgo.pro/site/mfa-verify": raise HTTPException(status_code=401, detail="Неверный код 2FA")
         return {"status": "success"}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
-# === ПРОФИЛЬ ===
+# === ПРОФИЛЬ (Шаблоны, Настройки, Заметки, Статистика, Сетка, Балансы) ===
 @app.post("/api/get_presets")
 def get_presets(req: BaseAuthReq): return {"status": "success", "presets": user_presets.get(get_user(req.session_token), [])}
 @app.post("/api/save_presets")
@@ -275,68 +226,34 @@ def fetch_tournaments(filters: FiltersRequest):
     user_session = sessions.get(filters.session_token)
     if not user_session: raise HTTPException(status_code=401, detail="Сессия не найдена")
 
-    base_domain = session_to_domain.get(filters.session_token, "https://globusmvp.co")
-    target_url = f"{base_domain}/tournament-selector/index-selector-player-old"
-
-    current_rang = "15" if "globusmvp.co" in base_domain else "16"
-    current_tz = "Europe/Athens" if "globusmvp.co" in base_domain else "Asia/Amman"
-
     params = [
         ('DailyTournamentAutoPlayerSearchOld[dateFrom]', format_date_for_target(filters.date_from)),
         ('DailyTournamentAutoPlayerSearchOld[dateTo]', format_date_for_target(filters.date_to)),
-        ('DailyTournamentAutoPlayerSearchOld[timeZone]', current_tz),
-        ('DailyTournamentAutoPlayerSearchOld[rang]', current_rang),
+        ('DailyTournamentAutoPlayerSearchOld[timeZone]', 'Asia/Amman'),
+        ('DailyTournamentAutoPlayerSearchOld[rang]', '16'),
         ('DailyTournamentAutoPlayerSearchOld[endSessionAt]', ''),
         ('DailyTournamentAutoPlayerSearchOld[buyInFrom]', ''),
         ('DailyTournamentAutoPlayerSearchOld[afsFrom]', ''),
         ('DailyTournamentAutoPlayerSearchOld[buyInTo]', ''),
         ('DailyTournamentAutoPlayerSearchOld[afsTo]', ''),
-        ('DailyTournamentAutoPlayerSearchOld[isFreezeout]', '0'),
-        ('DailyTournamentAutoPlayerSearchOld[isFreezeout]', '1'),
-        ('DailyTournamentAutoPlayerSearchOld[isPko]', '0'),
-        ('DailyTournamentAutoPlayerSearchOld[isPko]', '1'),
-        ('DailyTournamentAutoPlayerSearchOld[isTurbo]', '0'),
-        ('DailyTournamentAutoPlayerSearchOld[isTurbo]', '1'),
-        ('DailyTournamentAutoPlayerSearchOld[isHyperTurbo]', '0'),
-        ('DailyTournamentAutoPlayerSearchOld[isHyperTurbo]', '1'),
-        ('DailyTournamentAutoPlayerSearchOld[is6MaxTurboPko]', '0'),
-        ('DailyTournamentAutoPlayerSearchOld[is6MaxTurboPko]', '1'),
-        ('DailyTournamentAutoPlayerSearchOld[isSeries]', '0'),
-        ('DailyTournamentAutoPlayerSearchOld[isSeries]', '1'),
-        ('DailyTournamentAutoPlayerSearchOld[priority1]', '0'),
-        ('DailyTournamentAutoPlayerSearchOld[priority1]', '1'),
-        ('DailyTournamentAutoPlayerSearchOld[priority2]', '0'),
-        ('DailyTournamentAutoPlayerSearchOld[priority2]', '1'),
-        ('DailyTournamentAutoPlayerSearchOld[priority3]', '0'),
-        ('DailyTournamentAutoPlayerSearchOld[priority3]', '1'),
         ('formChanged', '1'), ('per-page', '1000'), ('page', '1')
     ]
-    
+    for key, val in filters.structs.model_dump().items():
+        params.append((f'DailyTournamentAutoPlayerSearchOld[{key}]', '0'))
+        if val == '1': params.append((f'DailyTournamentAutoPlayerSearchOld[{key}]', '1'))
+    for key, val in filters.priorities.model_dump().items():
+        params.append((f'DailyTournamentAutoPlayerSearchOld[{key}]', '0'))
+        if val == '1': params.append((f'DailyTournamentAutoPlayerSearchOld[{key}]', '1'))
     params.append(('DailyTournamentAutoPlayerSearchOld[networksIds]', ''))
-    
-    # Динамический выбор словаря ID в зависимости от домена
-    active_dict = NEW_ROOMS if "globusmvp.co" in base_domain else OLD_ROOMS
-    active_rooms = filters.rooms if filters.rooms else list(active_dict.values())
-    
-    # Страховка на случай, если прилетели ID от другого домена
-    if "globusmvp.co" in base_domain:
-        active_rooms = [active_dict.get(k, r) for r in active_rooms for k, v in OLD_ROOMS.items() if v == r] or list(NEW_ROOMS.values())
-    else:
-        active_rooms = [OLD_ROOMS.get(k, r) for r in active_rooms for k, v in NEW_ROOMS.items() if v == r] or list(OLD_ROOMS.values())
-
-    for room_id in active_rooms: 
-        params.append(('DailyTournamentAutoPlayerSearchOld[networksIds][]', room_id))
+    for room_id in filters.rooms: params.append(('DailyTournamentAutoPlayerSearchOld[networksIds][]', room_id))
 
     try:
-        response = user_session.get(target_url, params=params)
-        
+        response = user_session.get("https://globusgo.pro/tournament-selector/index-selector-player-old", params=params)
         if "login" in response.url: raise HTTPException(status_code=401)
-        
         soup = BeautifulSoup(response.text, 'html.parser')
         target_table = None
         for table in soup.find_all('table'):
             if 'Название' in table.text and 'ABI' in table.text: target_table = table; break
-        
         if not target_table: return {"status": "success", "data": []}
 
         tournaments = []
@@ -346,10 +263,13 @@ def fetch_tournaments(filters: FiltersRequest):
                 room_text = cols[0].text.strip()
                 if 'Ничего не найдено' in room_text: continue
                 
+                # Определяем PS(ES) и PS(COM) по фактическому названию из парсера
                 room = room_text
                 room_lower = room_text.lower()
                 
+                # Сначала убеждаемся, что это вообще семейство PokerStars
                 if 'pokerstars' in room_lower or 'ps' in room_lower:
+                    # И только теперь проверяем, Европа это или COM
                     if 'es' in room_lower or 'fr' in room_lower or 'pt' in room_lower:
                         room = "PS(ES)"
                     else:
@@ -361,7 +281,7 @@ def fetch_tournaments(filters: FiltersRequest):
                 
                 tournaments.append({
                     'id': f"{cols[5].text.strip()}_{cols[1].text.strip()}",
-                    'room': room,
+                    'room': room,  # теперь сюда улетит точное имя PS(ES) или PS(COM)
                     'name': cols[1].text.strip(), 'priority': cols[2].text.strip(),
                     'buyin': cols[3].text.strip(), 'reentry': cols[4].text.strip(),
                     'time_start': cols[5].text.strip(), 'roi_str': roi_str, 'ev_mtt': cols[7].text.strip(),
