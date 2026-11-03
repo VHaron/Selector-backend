@@ -266,8 +266,8 @@ def fetch_tournaments(filters: FiltersRequest):
     params = [
         ('DailyTournamentAutoPlayerSearchOld[dateFrom]', format_date_for_target(filters.date_from)),
         ('DailyTournamentAutoPlayerSearchOld[dateTo]', format_date_for_target(filters.date_to)),
-        ('DailyTournamentAutoPlayerSearchOld[timeZone]', 'Asia/Amman'),
-        ('DailyTournamentAutoPlayerSearchOld[rang]', '16'),
+        ('DailyTournamentAutoPlayerSearchOld[timeZone]', 'Europe/Athens'),
+        #('DailyTournamentAutoPlayerSearchOld[rang]', '15'),
         ('DailyTournamentAutoPlayerSearchOld[endSessionAt]', ''),
         ('DailyTournamentAutoPlayerSearchOld[buyInFrom]', ''),
         ('DailyTournamentAutoPlayerSearchOld[afsFrom]', ''),
