@@ -16,15 +16,17 @@ from typing import List, Dict, Any
 
 # force deploy
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8853116642:AAHCRMXQXowMsN9BdMShfxWltWqspo2pY1A")
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+# Keep bot credentials in deployment secrets, never in source control.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    markup = InlineKeyboardMarkup()
-    webapp_info = WebAppInfo(url="https://mvp-selector-bot-frontend.vercel.app")
-    markup.add(InlineKeyboardButton("🚀 Открыть селектор MVP", web_app=webapp_info))
-    bot.send_message(message.chat.id, "Привет! Селектор готов к работе:", reply_markup=markup)
+if bot:
+    @bot.message_handler(commands=['start'])
+    def send_welcome(message):
+        markup = InlineKeyboardMarkup()
+        webapp_info = WebAppInfo(url="https://mvp-selector-bot-frontend.vercel.app")
+        markup.add(InlineKeyboardButton("🚀 Открыть селектор MVP", web_app=webapp_info))
+        bot.send_message(message.chat.id, "Привет! Селектор готов к работе:", reply_markup=markup)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -33,7 +35,12 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 
 # === БАЗЫ ДАННЫХ (в JSON) ===
 sessions: dict[str, requests.Session] = {}
-session_to_user: dict[str, str] = {} 
+session_to_user: dict[str, str] = {}
+session_to_site: dict[str, str] = {}
+session_mfa_url: dict[str, str] = {}
+
+SITE_BASES = {"globusgo": "https://globusgo.pro", "globusmvp": "https://globusmvp.co"}
+
 
 def get_db_path(filename):
     return f"/data/{filename}" if os.path.exists("/data") else filename
@@ -68,12 +75,16 @@ ROOMS = {
     '888Poker': '244', 'Chico': '245', 'GGNetwork': '246',
     'iPoker': '247', 'PartyPoker': '248', 'PokerStars': '249',
     'PokerStars(FR-ES-PT)': '250', 'Winamax.fr': '251', 'WPN': '252',
-    'Pokerdom': '264', 'WPTGLobal': '266', 'CoinPoker': '265'
+    'Pokerdom': '264', 'WPTGLobal': '266', 'CoinPoker': '265',
+    'ClubGG': '267', 'WPT': '268'
 }
 
 # === СХЕМЫ ===
 class BaseAuthReq(BaseModel): session_token: str
-class LoginRequest(BaseModel): username: str; password: str
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    site: str = "auto"  # auto | globusgo | globusmvp
 class MFARequest(BaseAuthReq): otp: str
 
 class StructsFilter(BaseModel):
@@ -83,6 +94,7 @@ class PrioritiesFilter(BaseModel): priority1: str = '1'; priority2: str = '1'; p
 
 class FiltersRequest(BaseAuthReq):
     date_from: str = ''; date_to: str = ''
+    # Frontend sends canonical GlobusGo room IDs; they are translated to each site's own IDs.
     rooms: list[str] = list(ROOMS.values())
     structs: StructsFilter = StructsFilter()
     priorities: PrioritiesFilter = PrioritiesFilter()
@@ -112,42 +124,124 @@ def format_date_for_target(dt_str: str) -> str:
         return dt_str.replace("T", " ")
 
 def get_user(token: str):
-    if token not in sessions: raise HTTPException(status_code=401, detail="Сессия не найдена.")
-    user = session_to_user.get(token)
-    if not user: raise HTTPException(status_code=400, detail="Пользователь не найден")
-    return user
+    if token not in sessions:
+        raise HTTPException(status_code=401, detail="Сессия не найдена.")
+    username = session_to_user.get(token)
+    if not username:
+        raise HTTPException(status_code=400, detail="Пользователь не найден")
+    # Keep existing GlobusGo profile keys intact; isolate GlobusMVP data.
+    site = session_to_site.get(token, "globusgo")
+    return username if site == "globusgo" else f"{site}:{username}"
+
+
+def _csrf_from_page(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    field = soup.find("input", {"name": "_csrf-backend"})
+    if not field or not field.get("value"):
+        raise ValueError("На странице авторизации не найден CSRF-токен")
+    return field["value"]
+
+
+def _try_site_login(req: LoginRequest, site: str):
+    base = SITE_BASES[site]
+    user_session = requests.Session()
+    user_session.verify = False
+    user_session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Referer": f"{base}/site/login",
+    })
+    response = user_session.get(f"{base}/site/login", timeout=25)
+    csrf_value = _csrf_from_page(response.text)
+    post_response = user_session.post(
+        f"{base}/site/login",
+        data={
+            "_csrf-backend": csrf_value,
+            "LoginForm[username]": req.username,
+            "LoginForm[password]": req.password,
+            "LoginForm[rememberMe]": "1",
+        },
+        allow_redirects=True,
+        timeout=25,
+    )
+    final_url = post_response.url.lower()
+    page = BeautifulSoup(post_response.text, "html.parser")
+    login_form_still_visible = bool(page.find("input", {"name": "LoginForm[password]"}))
+    if "/site/login" in final_url and login_form_still_visible:
+        user_session.close()
+        return None
+
+    token = str(uuid.uuid4())
+    sessions[token] = user_session
+    session_to_user[token] = req.username
+    session_to_site[token] = site
+
+    if "mfa" in final_url or "otp" in final_url or "двухфактор" in post_response.text.lower():
+        session_mfa_url[token] = post_response.url if "mfa" in final_url or "otp" in final_url else f"{base}/site/mfa-verify"
+        return {"status": "mfa_required", "session_token": token, "site": site}
+
+    # A login redirect back to the login page is a failed login even if the HTML differs.
+    if "/site/login" in final_url:
+        sessions.pop(token, None)
+        session_to_user.pop(token, None)
+        session_to_site.pop(token, None)
+        user_session.close()
+        return None
+    return {"status": "success", "session_token": token, "site": site}
+
 
 # === ЭНДПОИНТЫ АВТОРИЗАЦИИ ===
 @app.post("/api/login")
 def login(req: LoginRequest):
-    user_session = requests.Session()
-    user_session.verify = False 
-    user_session.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': 'https://globusgo.pro/site/login'})
-    try:
-        response = user_session.get("https://globusgo.pro/site/login")
-        soup = BeautifulSoup(response.text, 'html.parser')
-        csrf_value = soup.find('input', {'name': '_csrf-backend'}).get('value')
-        post_response = user_session.post("https://globusgo.pro/site/login", data={'_csrf-backend': csrf_value, 'LoginForm[username]': req.username, 'LoginForm[password]': req.password, 'LoginForm[rememberMe]': '1'})
-        token = str(uuid.uuid4())
-        sessions[token] = user_session
-        session_to_user[token] = req.username
-        
-        if post_response.url == "https://globusgo.pro/site/login": raise HTTPException(status_code=401, detail="Неверный логин")
-        elif "mfa" in post_response.url.lower(): return {"status": "mfa_required", "session_token": token}
-        else: return {"status": "success", "session_token": token}
-    except HTTPException: raise
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+    requested_site = (req.site or "auto").lower()
+    if requested_site not in ("auto", *SITE_BASES.keys()):
+        raise HTTPException(status_code=400, detail="Неизвестный сайт авторизации")
+    sites_to_try = list(SITE_BASES) if requested_site == "auto" else [requested_site]
+    errors = []
+    for site in sites_to_try:
+        try:
+            result = _try_site_login(req, site)
+            if result:
+                return result
+        except requests.RequestException as e:
+            errors.append(f"{site}: сайт временно недоступен")
+        except Exception as e:
+            errors.append(f"{site}: {str(e)}")
+    if errors and len(errors) == len(sites_to_try):
+        raise HTTPException(status_code=502, detail="Не удалось проверить авторизацию: " + "; ".join(errors))
+    raise HTTPException(status_code=401, detail="Логин или пароль не подошли ни к GlobusGo, ни к GlobusMVP")
+
 
 @app.post("/api/mfa")
 def verify_mfa(req: MFARequest):
     user_session = sessions.get(req.session_token)
+    if not user_session:
+        raise HTTPException(status_code=401, detail="Сессия авторизации истекла. Войдите заново.")
+    site = session_to_site.get(req.session_token, "globusgo")
+    base = SITE_BASES[site]
+    mfa_url = session_mfa_url.get(req.session_token, f"{base}/site/mfa-verify")
     try:
-        response = user_session.get("https://globusgo.pro/site/mfa-verify")
-        csrf_value = BeautifulSoup(response.text, 'html.parser').find('input', {'name': '_csrf-backend'}).get('value')
-        post_response = user_session.post("https://globusgo.pro/site/mfa-verify", data={'_csrf-backend': csrf_value, 'OtpForm[otp]': req.otp})
-        if post_response.url == "https://globusgo.pro/site/mfa-verify": raise HTTPException(status_code=401, detail="Неверный код 2FA")
-        return {"status": "success"}
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+        response = user_session.get(mfa_url, timeout=25)
+        csrf_value = _csrf_from_page(response.text)
+        mfa_soup = BeautifulSoup(response.text, "html.parser")
+        otp_input = next((field for field in mfa_soup.find_all("input")
+                          if any(part in (field.get("name") or "").lower() for part in ("otp", "code"))), None)
+        otp_field_name = otp_input.get("name") if otp_input else "OtpForm[otp]"
+        post_response = user_session.post(
+            response.url,
+            data={"_csrf-backend": csrf_value, otp_field_name: req.otp},
+            allow_redirects=True,
+            timeout=25,
+        )
+        if "mfa" in post_response.url.lower() or "otp" in post_response.url.lower():
+            raise HTTPException(status_code=401, detail="Неверный код 2FA")
+        if "/site/login" in post_response.url.lower():
+            raise HTTPException(status_code=401, detail="Сессия авторизации истекла. Войдите заново.")
+        session_mfa_url.pop(req.session_token, None)
+        return {"status": "success", "site": site}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ошибка проверки 2FA на {site}: {str(e)}")
 
 # === ПРОФИЛЬ (Шаблоны, Настройки, Заметки, Статистика, Сетка, Балансы) ===
 @app.post("/api/get_presets")
@@ -220,11 +314,79 @@ def save_balances(req: SaveBalancesRequest):
     save_json_db(BALANCES_FILE, user_balances)
     return {"status": "success"}
 
+# === СОПОСТАВЛЕНИЕ РУМОВ МЕЖДУ САЙТАМИ ===
+ROOM_ALIASES = {
+    "244": ("888", "888poker"), "245": ("chico", "betonline"),
+    "246": ("ggnetwork", "ggpoker", "ggnet"), "247": ("ipoker", "redstar"),
+    "248": ("partypoker", "party poker"), "249": ("pokerstars.com", "pokerstars (com)", "ps(com)"),
+    "250": ("pokerstars.fr", "pokerstars.es", "pokerstars.pt", "ps(es)", "ps(fr)"),
+    "251": ("winamax",), "252": ("wpn", "americas cardroom", "acr"),
+    "264": ("pokerdom",), "266": ("wptglobal", "wpt global"), "265": ("coinpoker", "coin poker"),
+    "267": ("clubgg", "club gg"), "268": ("wpt",),
+}
+
+
+def _canonical_room_id(label: str):
+    value = " ".join((label or "").lower().replace("_", " ").split())
+    if not value:
+        return None
+    if "pokerstars" in value or value.startswith("ps"):
+        if any(region in value for region in (" es", "(es", " fr", "(fr", " pt", "(pt", "fr-es-pt")):
+            return "250"
+        if "com" in value or value.strip() in ("pokerstars", "ps", "ps.com"):
+            return "249"
+    for canonical_id, aliases in ROOM_ALIASES.items():
+        if any(alias in value for alias in aliases):
+            return canonical_id
+    # Exact canonical labels are useful on GlobusGo and on pages with short labels.
+    for canonical_id, room_label in {v: k for k, v in ROOMS.items()}.items():
+        if value == room_label.lower():
+            return canonical_id
+    return None
+
+
+def _resolve_room_ids(soup: BeautifulSoup, requested_ids: list[str], site: str) -> list[str]:
+    requested = {str(room_id) for room_id in requested_ids}
+    if not requested:
+        return []
+    found = {}
+    # The selector may render the room filter as a multi-select or as checkboxes.
+    for option in soup.find_all("option"):
+        canonical = _canonical_room_id(option.get_text(" ", strip=True))
+        value = option.get("value")
+        if canonical in requested and value:
+            found[canonical] = value
+    for field in soup.find_all(["input"]):
+        name = (field.get("name") or "").lower()
+        if "networksids" not in name:
+            continue
+        label_text = ""
+        if field.get("id"):
+            label = soup.find("label", attrs={"for": field.get("id")})
+            if label:
+                label_text = label.get_text(" ", strip=True)
+        parent = field.parent
+        if parent:
+            label_text += " " + parent.get_text(" ", strip=True)
+        canonical = _canonical_room_id(label_text)
+        if canonical in requested and field.get("value"):
+            found[canonical] = field.get("value")
+    if site == "globusgo":
+        # Preserve the original site's established IDs as a compatibility fallback.
+        for room_id in requested:
+            found.setdefault(room_id, room_id)
+    if not found and site == "globusmvp":
+        raise HTTPException(status_code=502, detail="Не удалось определить ID румов GlobusMVP из формы фильтров. Ничего не отправлено, чтобы не подставить неверные ID.")
+    return list(dict.fromkeys(found.values()))
+
+
 # === ТУРНИРЫ ===
 @app.post("/api/tournaments")
 def fetch_tournaments(filters: FiltersRequest):
     user_session = sessions.get(filters.session_token)
     if not user_session: raise HTTPException(status_code=401, detail="Сессия не найдена")
+    site = session_to_site.get(filters.session_token, "globusgo")
+    base = SITE_BASES[site]
 
     params = [
         ('DailyTournamentAutoPlayerSearchOld[dateFrom]', format_date_for_target(filters.date_from)),
@@ -244,12 +406,20 @@ def fetch_tournaments(filters: FiltersRequest):
     for key, val in filters.priorities.model_dump().items():
         params.append((f'DailyTournamentAutoPlayerSearchOld[{key}]', '0'))
         if val == '1': params.append((f'DailyTournamentAutoPlayerSearchOld[{key}]', '1'))
-    params.append(('DailyTournamentAutoPlayerSearchOld[networksIds]', ''))
-    for room_id in filters.rooms: params.append(('DailyTournamentAutoPlayerSearchOld[networksIds][]', room_id))
-
     try:
-        response = user_session.get("https://globusgo.pro/tournament-selector/index-selector-player-old", params=params)
-        if "login" in response.url: raise HTTPException(status_code=401)
+        selector_url = f"{base}/tournament-selector/index-selector-player-old"
+        # Read the authenticated selector first: room IDs are site-specific and must not
+        # be copied from GlobusGo to GlobusMVP.
+        page_response = user_session.get(selector_url, timeout=30)
+        if "/site/login" in page_response.url.lower():
+            raise HTTPException(status_code=401, detail="Авторизация на исходном сайте истекла")
+        page_soup = BeautifulSoup(page_response.text, 'html.parser')
+        site_room_ids = _resolve_room_ids(page_soup, filters.rooms, site)
+        params.append(('DailyTournamentAutoPlayerSearchOld[networksIds]', ''))
+        for room_id in site_room_ids:
+            params.append(('DailyTournamentAutoPlayerSearchOld[networksIds][]', room_id))
+        response = user_session.get(selector_url, params=params, timeout=45)
+        if "/site/login" in response.url.lower(): raise HTTPException(status_code=401, detail="Авторизация на исходном сайте истекла")
         soup = BeautifulSoup(response.text, 'html.parser')
         target_table = None
         for table in soup.find_all('table'):
@@ -280,7 +450,8 @@ def fetch_tournaments(filters: FiltersRequest):
                 except: roi_str = f"{roi}%" if '%' not in roi else roi
                 
                 tournaments.append({
-                    'id': f"{cols[5].text.strip()}_{cols[1].text.strip()}",
+                    'id': f"{site}_{cols[5].text.strip()}_{cols[1].text.strip()}",
+                    'source': site,
                     'room': room,  # теперь сюда улетит точное имя PS(ES) или PS(COM)
                     'name': cols[1].text.strip(), 'priority': cols[2].text.strip(),
                     'buyin': cols[3].text.strip(), 'reentry': cols[4].text.strip(),
@@ -289,8 +460,12 @@ def fetch_tournaments(filters: FiltersRequest):
                     'gtd': cols[11].text.strip(), 'afs': cols[12].text.strip()
                 })
         return {"status": "success", "data": tournaments}
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    threading.Thread(target=lambda: bot.infinity_polling(none_stop=True), daemon=True).start()
+    if bot:
+        threading.Thread(target=lambda: bot.infinity_polling(none_stop=True), daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
