@@ -34,7 +34,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 # === БАЗЫ ДАННЫХ ===
 sessions: dict[str, requests.Session] = {}
 session_to_user: dict[str, str] = {} 
-session_to_url: dict[str, str] = {} # 👈 КЭШ: Сюда будем сохранять, какой URL подошел для этой сессии
+session_to_domain: dict[str, str] = {} # 👈 КЭШ: Запоминаем, на каком сайте залогинился юзер (основа или микро)
 
 def get_db_path(filename):
     return f"/data/{filename}" if os.path.exists("/data") else filename
@@ -121,32 +121,67 @@ def get_user(token: str):
 # === ЭНДПОИНТЫ АВТОРИЗАЦИИ ===
 @app.post("/api/login")
 def login(req: LoginRequest):
-    user_session = requests.Session()
-    user_session.verify = False 
-    user_session.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': 'https://globusgo.pro/site/login'})
-    try:
-        response = user_session.get("https://globusgo.pro/site/login")
-        soup = BeautifulSoup(response.text, 'html.parser')
-        csrf_value = soup.find('input', {'name': '_csrf-backend'}).get('value')
-        post_response = user_session.post("https://globusgo.pro/site/login", data={'_csrf-backend': csrf_value, 'LoginForm[username]': req.username, 'LoginForm[password]': req.password, 'LoginForm[rememberMe]': '1'})
-        token = str(uuid.uuid4())
-        sessions[token] = user_session
-        session_to_user[token] = req.username
+    # 👇👇👇 УКАЖИ ТУТ НОВЫЙ САЙТ (БЕЗ /site/login на конце) 👇👇👇
+    NEW_DOMAIN = "https://globusmvp.co" 
+    OLD_DOMAIN = "https://globusgo.pro"
+
+    def attempt_login(base_url):
+        u_session = requests.Session()
+        u_session.verify = False 
+        u_session.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': f'{base_url}/site/login'})
+        try:
+            resp = u_session.get(f"{base_url}/site/login", timeout=10)
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            csrf_input = soup.find('input', {'name': '_csrf-backend'})
+            if not csrf_input: return None, None
+            
+            post_resp = u_session.post(f"{base_url}/site/login", data={
+                '_csrf-backend': csrf_input.get('value'), 
+                'LoginForm[username]': req.username, 
+                'LoginForm[password]': req.password, 
+                'LoginForm[rememberMe]': '1'
+            }, timeout=10)
+            return u_session, post_resp
+        except:
+            return None, None
+
+    # Шаг 1: Пробуем зайти на новый портал основы
+    active_session, post_response = attempt_login(NEW_DOMAIN)
+    active_domain = NEW_DOMAIN
+
+    # Шаг 2: Если остался на странице логина (неверный пароль) или сайт не ответил — пробуем старый
+    if not post_response or post_response.url == f"{NEW_DOMAIN}/site/login":
+        active_session, post_response = attempt_login(OLD_DOMAIN)
+        active_domain = OLD_DOMAIN
+
+    # Шаг 3: Если и старый сайт не пустил
+    if not post_response or post_response.url == f"{active_domain}/site/login":
+        raise HTTPException(status_code=401, detail="Неверный логин")
         
-        if post_response.url == "https://globusgo.pro/site/login": raise HTTPException(status_code=401, detail="Неверный логин")
-        elif "mfa" in post_response.url.lower(): return {"status": "mfa_required", "session_token": token}
-        else: return {"status": "success", "session_token": token}
-    except HTTPException: raise
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+    token = str(uuid.uuid4())
+    sessions[token] = active_session
+    session_to_user[token] = req.username
+    session_to_domain[token] = active_domain  # <--- Кэшируем рабочий домен!
+    
+    if "mfa" in post_response.url.lower(): 
+        return {"status": "mfa_required", "session_token": token}
+    else: 
+        return {"status": "success", "session_token": token}
 
 @app.post("/api/mfa")
 def verify_mfa(req: MFARequest):
     user_session = sessions.get(req.session_token)
+    base_domain = session_to_domain.get(req.session_token, "https://globusgo.pro")
+    
     try:
-        response = user_session.get("https://globusgo.pro/site/mfa-verify")
+        response = user_session.get(f"{base_domain}/site/mfa-verify")
         csrf_value = BeautifulSoup(response.text, 'html.parser').find('input', {'name': '_csrf-backend'}).get('value')
-        post_response = user_session.post("https://globusgo.pro/site/mfa-verify", data={'_csrf-backend': csrf_value, 'OtpForm[otp]': req.otp})
-        if post_response.url == "https://globusgo.pro/site/mfa-verify": raise HTTPException(status_code=401, detail="Неверный код 2FA")
+        post_response = user_session.post(f"{base_domain}/site/mfa-verify", data={
+            '_csrf-backend': csrf_value, 
+            'OtpForm[otp]': req.otp
+        })
+        if post_response.url == f"{base_domain}/site/mfa-verify": 
+            raise HTTPException(status_code=401, detail="Неверный код 2FA")
         return {"status": "success"}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
@@ -227,6 +262,12 @@ def fetch_tournaments(filters: FiltersRequest):
     user_session = sessions.get(filters.session_token)
     if not user_session: raise HTTPException(status_code=401, detail="Сессия не найдена")
 
+    # Берем рабочий домен из памяти (тот, куда юзер успешно залогинился)
+    base_domain = session_to_domain.get(filters.session_token, "https://globusgo.pro")
+    
+    # Формируем итоговую ссылку парсера на основе домена юзера
+    target_url = f"{base_domain}/tournament-selector/index-selector-player-old"
+
     params = [
         ('DailyTournamentAutoPlayerSearchOld[dateFrom]', format_date_for_target(filters.date_from)),
         ('DailyTournamentAutoPlayerSearchOld[dateTo]', format_date_for_target(filters.date_to)),
@@ -249,40 +290,16 @@ def fetch_tournaments(filters: FiltersRequest):
     for room_id in filters.rooms: params.append(('DailyTournamentAutoPlayerSearchOld[networksIds][]', room_id))
 
     try:
-        # === ЛОГИКА АВТООПРЕДЕЛЕНИЯ ДОСТУПА ===
-        NEW_GLOBUS_URL = "https://globusmvp.co/tournament-selector/index-selector-player-old" 
-        OLD_GLOBUS_URL = "https://globusgo.pro/tournament-selector/index-selector-player-old"
-        
-        # Смотрим, запомнили ли мы уже рабочий URL для этой сессии
-        target_url = session_to_url.get(filters.session_token)
-        is_first_check = False
-
-        if not target_url:
-            # Если ищем первый раз за сессию, стучимся по ссылке основы
-            target_url = NEW_GLOBUS_URL
-            is_first_check = True
-
         response = user_session.get(target_url, params=params)
+        
+        # Если случайно выкинуло из сессии
         if "login" in response.url: raise HTTPException(status_code=401)
         
         soup = BeautifulSoup(response.text, 'html.parser')
         target_table = None
         for table in soup.find_all('table'):
             if 'Название' in table.text and 'ABI' in table.text: target_table = table; break
-
-        # Если таблица не найдена (нет прав на основу) и мы проверяли первый раз — откатываемся на старую ссылку
-        if not target_table and is_first_check:
-            target_url = OLD_GLOBUS_URL
-            response = user_session.get(target_url, params=params)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            for table in soup.find_all('table'):
-                if 'Название' in table.text and 'ABI' in table.text: target_table = table; break
-
-        # Сохраняем успешный URL в память (кэш), чтобы больше не проверять при следующих поисках
-        session_to_url[filters.session_token] = target_url
-
-        # === КОНЕЦ ЛОГИКИ АВТООПРЕДЕЛЕНИЯ ===
-
+        
         if not target_table: return {"status": "success", "data": []}
 
         tournaments = []
