@@ -31,9 +31,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = FastAPI(title="MVP Selector API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# === БАЗЫ ДАННЫХ (в JSON) ===
+# === БАЗЫ ДАННЫХ ===
 sessions: dict[str, requests.Session] = {}
 session_to_user: dict[str, str] = {} 
+session_to_url: dict[str, str] = {} # 👈 КЭШ: Сюда будем сохранять, какой URL подошел для этой сессии
 
 def get_db_path(filename):
     return f"/data/{filename}" if os.path.exists("/data") else filename
@@ -248,12 +249,40 @@ def fetch_tournaments(filters: FiltersRequest):
     for room_id in filters.rooms: params.append(('DailyTournamentAutoPlayerSearchOld[networksIds][]', room_id))
 
     try:
-        response = user_session.get("https://globusgo.pro/tournament-selector/index-selector-player-old", params=params)
+        # === ЛОГИКА АВТООПРЕДЕЛЕНИЯ ДОСТУПА ===
+        NEW_GLOBUS_URL = "https://globusmvp.co/tournament-selector/index-selector-player-old" 
+        OLD_GLOBUS_URL = "https://globusgo.pro/tournament-selector/index-selector-player-old"
+        
+        # Смотрим, запомнили ли мы уже рабочий URL для этой сессии
+        target_url = session_to_url.get(filters.session_token)
+        is_first_check = False
+
+        if not target_url:
+            # Если ищем первый раз за сессию, стучимся по ссылке основы
+            target_url = NEW_GLOBUS_URL
+            is_first_check = True
+
+        response = user_session.get(target_url, params=params)
         if "login" in response.url: raise HTTPException(status_code=401)
+        
         soup = BeautifulSoup(response.text, 'html.parser')
         target_table = None
         for table in soup.find_all('table'):
             if 'Название' in table.text and 'ABI' in table.text: target_table = table; break
+
+        # Если таблица не найдена (нет прав на основу) и мы проверяли первый раз — откатываемся на старую ссылку
+        if not target_table and is_first_check:
+            target_url = OLD_GLOBUS_URL
+            response = user_session.get(target_url, params=params)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for table in soup.find_all('table'):
+                if 'Название' in table.text and 'ABI' in table.text: target_table = table; break
+
+        # Сохраняем успешный URL в память (кэш), чтобы больше не проверять при следующих поисках
+        session_to_url[filters.session_token] = target_url
+
+        # === КОНЕЦ ЛОГИКИ АВТООПРЕДЕЛЕНИЯ ===
+
         if not target_table: return {"status": "success", "data": []}
 
         tournaments = []
@@ -263,13 +292,10 @@ def fetch_tournaments(filters: FiltersRequest):
                 room_text = cols[0].text.strip()
                 if 'Ничего не найдено' in room_text: continue
                 
-                # Определяем PS(ES) и PS(COM) по фактическому названию из парсера
                 room = room_text
                 room_lower = room_text.lower()
                 
-                # Сначала убеждаемся, что это вообще семейство PokerStars
                 if 'pokerstars' in room_lower or 'ps' in room_lower:
-                    # И только теперь проверяем, Европа это или COM
                     if 'es' in room_lower or 'fr' in room_lower or 'pt' in room_lower:
                         room = "PS(ES)"
                     else:
@@ -281,7 +307,7 @@ def fetch_tournaments(filters: FiltersRequest):
                 
                 tournaments.append({
                     'id': f"{cols[5].text.strip()}_{cols[1].text.strip()}",
-                    'room': room,  # теперь сюда улетит точное имя PS(ES) или PS(COM)
+                    'room': room,
                     'name': cols[1].text.strip(), 'priority': cols[2].text.strip(),
                     'buyin': cols[3].text.strip(), 'reentry': cols[4].text.strip(),
                     'time_start': cols[5].text.strip(), 'roi_str': roi_str, 'ev_mtt': cols[7].text.strip(),
