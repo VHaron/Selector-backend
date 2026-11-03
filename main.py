@@ -104,18 +104,22 @@ class SaveBalancesRequest(BaseAuthReq): balances: Dict[str, float]
 
 def format_date_for_target(dt_str: str) -> str:
     if not dt_str: return ""
-    # Возвращаем стандартный проверенный формат ДД.ММ.ГГГГ ЧЧ:ММ без ломающей буквы T
+    # Если фронтенд или браузер уже шлют нормальный формат с T — оставляем как есть
+    if "T" in dt_str:
+        return dt_str.strip()
     try:
-        clean_str = dt_str.replace("T", " ").strip()
-        if "-" in clean_str and "." not in clean_str:
+        clean_str = dt_str.strip()
+        if "." in clean_str:
             parts = clean_str.split(" ")
             date_part = parts[0]
             time_part = parts[1] if len(parts) > 1 else "00:00"
-            y, m, d = date_part.split("-")
-            return f"{d}.{m}.{y} {time_part}"
+            if len(time_part.split(":")) == 2:
+                time_part += ":00"
+            d, m, y = date_part.split(".")
+            return f"{y}-{m}-{d}T{time_part}"
         return clean_str
     except:
-        return dt_str.replace("T", " ")
+        return dt_str
 
 def get_user(token: str):
     if token not in sessions: raise HTTPException(status_code=401, detail="Сессия не найдена.")
@@ -266,7 +270,6 @@ def fetch_tournaments(filters: FiltersRequest):
     base_domain = session_to_domain.get(filters.session_token, "https://globusmvp.co")
     target_url = f"{base_domain}/tournament-selector/index-selector-player-old"
 
-    # Определяем ранг в зависимости от домена (для основы — 15, для старого — 16)
     current_rang = "15" if "globusmvp.co" in base_domain else "16"
     current_tz = "Europe/Athens" if "globusmvp.co" in base_domain else "Asia/Amman"
 
