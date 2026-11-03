@@ -34,7 +34,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 # === БАЗЫ ДАННЫХ ===
 sessions: dict[str, requests.Session] = {}
 session_to_user: dict[str, str] = {} 
-session_to_domain: dict[str, str] = {} # 👈 КЭШ: Запоминаем, на каком сайте залогинился юзер (основа или микро)
+session_to_domain: dict[str, str] = {} 
 
 def get_db_path(filename):
     return f"/data/{filename}" if os.path.exists("/data") else filename
@@ -121,7 +121,6 @@ def get_user(token: str):
 # === ЭНДПОИНТЫ АВТОРИЗАЦИИ ===
 @app.post("/api/login")
 def login(req: LoginRequest):
-    # 👇👇👇 УКАЖИ ТУТ НОВЫЙ САЙТ (БЕЗ /site/login на конце) 👇👇👇
     NEW_DOMAIN = "https://globusmvp.co" 
     OLD_DOMAIN = "https://globusgo.pro"
 
@@ -145,23 +144,22 @@ def login(req: LoginRequest):
         except:
             return None, None
 
-    # Шаг 1: Пробуем зайти на новый портал основы
+    # Сначала пробуем новый домен основы
     active_session, post_response = attempt_login(NEW_DOMAIN)
     active_domain = NEW_DOMAIN
 
-    # Шаг 2: Если остался на странице логина (неверный пароль) или сайт не ответил — пробуем старый
+    # Если на новом не получилось — падаем на старый
     if not post_response or post_response.url == f"{NEW_DOMAIN}/site/login":
         active_session, post_response = attempt_login(OLD_DOMAIN)
         active_domain = OLD_DOMAIN
 
-    # Шаг 3: Если и старый сайт не пустил
     if not post_response or post_response.url == f"{active_domain}/site/login":
         raise HTTPException(status_code=401, detail="Неверный логин")
         
     token = str(uuid.uuid4())
     sessions[token] = active_session
     session_to_user[token] = req.username
-    session_to_domain[token] = active_domain  # <--- Кэшируем рабочий домен!
+    session_to_domain[token] = active_domain  
     
     if "mfa" in post_response.url.lower(): 
         return {"status": "mfa_required", "session_token": token}
@@ -171,7 +169,7 @@ def login(req: LoginRequest):
 @app.post("/api/mfa")
 def verify_mfa(req: MFARequest):
     user_session = sessions.get(req.session_token)
-    base_domain = session_to_domain.get(req.session_token, "https://globusgo.pro")
+    base_domain = session_to_domain.get(req.session_token, "https://globusmvp.co")
     
     try:
         response = user_session.get(f"{base_domain}/site/mfa-verify")
@@ -185,7 +183,7 @@ def verify_mfa(req: MFARequest):
         return {"status": "success"}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
-# === ПРОФИЛЬ (Шаблоны, Настройки, Заметки, Статистика, Сетка, Балансы) ===
+# === ПРОФИЛЬ ===
 @app.post("/api/get_presets")
 def get_presets(req: BaseAuthReq): return {"status": "success", "presets": user_presets.get(get_user(req.session_token), [])}
 @app.post("/api/save_presets")
@@ -262,10 +260,7 @@ def fetch_tournaments(filters: FiltersRequest):
     user_session = sessions.get(filters.session_token)
     if not user_session: raise HTTPException(status_code=401, detail="Сессия не найдена")
 
-    # Берем рабочий домен из памяти (тот, куда юзер успешно залогинился)
-    base_domain = session_to_domain.get(filters.session_token, "https://globusgo.pro")
-    
-    # Формируем итоговую ссылку парсера на основе домена юзера
+    base_domain = session_to_domain.get(filters.session_token, "https://globusmvp.co")
     target_url = f"{base_domain}/tournament-selector/index-selector-player-old"
 
     params = [
@@ -292,7 +287,6 @@ def fetch_tournaments(filters: FiltersRequest):
     try:
         response = user_session.get(target_url, params=params)
         
-        # Если случайно выкинуло из сессии
         if "login" in response.url: raise HTTPException(status_code=401)
         
         soup = BeautifulSoup(response.text, 'html.parser')
