@@ -104,18 +104,158 @@ class SaveBalancesRequest(BaseAuthReq): balances: Dict[str, float]
 
 def format_date_for_target(dt_str: str) -> str:
     if not dt_str: return ""
-    clean_str = dt_str.replace("T", " ").strip()
+    # Возвращаем стандартный проверенный формат ДД.ММ.ГГГГ ЧЧ:ММ без ломающей буквы T
     try:
-        if "." in clean_str:
+        clean_str = dt_str.replace("T", " ").strip()
+        if "-" in clean_str and "." not in clean_str:
             parts = clean_str.split(" ")
             date_part = parts[0]
             time_part = parts[1] if len(parts) > 1 else "00:00"
-            d, m, y = date_part.split(".")
-            # Точный формат YYYY-MM-DDTHH:MM, который требует globusmvp.co
-            return f"{y}-{m}-{d}T{time_part}"
+            y, m, d = date_part.split("-")
+            return f"{d}.{m}.{y} {time_part}"
         return clean_str
     except:
-        return clean_str
+        return dt_str.replace("T", " ")
+
+def get_user(token: str):
+    if token not in sessions: raise HTTPException(status_code=401, detail="Сессия не найдена.")
+    user = session_to_user.get(token)
+    if not user: raise HTTPException(status_code=400, detail="Пользователь не найден")
+    return user
+
+# === ЭНДПОИНТЫ АВТОРИЗАЦИИ ===
+@app.post("/api/login")
+def login(req: LoginRequest):
+    NEW_DOMAIN = "https://globusmvp.co" 
+    OLD_DOMAIN = "https://globusgo.pro"
+
+    def attempt_login(base_url):
+        u_session = requests.Session()
+        u_session.verify = False 
+        u_session.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': f'{base_url}/site/login'})
+        try:
+            resp = u_session.get(f"{base_url}/site/login", timeout=10)
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            csrf_input = soup.find('input', {'name': '_csrf-backend'})
+            if not csrf_input: return None, None
+            
+            post_resp = u_session.post(f"{base_url}/site/login", data={
+                '_csrf-backend': csrf_input.get('value'), 
+                'LoginForm[username]': req.username, 
+                'LoginForm[password]': req.password, 
+                'LoginForm[rememberMe]': '1'
+            }, timeout=10)
+            return u_session, post_resp
+        except:
+            return None, None
+
+    active_session, post_response = attempt_login(NEW_DOMAIN)
+    active_domain = NEW_DOMAIN
+
+    if not post_response or post_response.url == f"{NEW_DOMAIN}/site/login":
+        active_session, post_response = attempt_login(OLD_DOMAIN)
+        active_domain = OLD_DOMAIN
+
+    if not post_response or post_response.url == f"{active_domain}/site/login":
+        raise HTTPException(status_code=401, detail="Неверный логин")
+        
+    token = str(uuid.uuid4())
+    sessions[token] = active_session
+    session_to_user[token] = req.username
+    session_to_domain[token] = active_domain  
+    
+    if "mfa" in post_response.url.lower(): 
+        return {"status": "mfa_required", "session_token": token}
+    else: 
+        return {"status": "success", "session_token": token}
+
+@app.post("/api/mfa")
+def verify_mfa(req: MFARequest):
+    user_session = sessions.get(req.session_token)
+    base_domain = session_to_domain.get(req.session_token, "https://globusmvp.co")
+    
+    try:
+        response = user_session.get(f"{base_domain}/site/mfa-verify")
+        csrf_value = BeautifulSoup(response.text, 'html.parser').find('input', {'name': '_csrf-backend'}).get('value')
+        post_response = user_session.post(f"{base_domain}/site/mfa-verify", data={
+            '_csrf-backend': csrf_value, 
+            'OtpForm[otp]': req.otp
+        })
+        if post_response.url == f"{base_domain}/site/mfa-verify": 
+            raise HTTPException(status_code=401, detail="Неверный код 2FA")
+        return {"status": "success"}
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
+# === ПРОФИЛЬ ===
+@app.post("/api/get_presets")
+def get_presets(req: BaseAuthReq): return {"status": "success", "presets": user_presets.get(get_user(req.session_token), [])}
+@app.post("/api/save_presets")
+def save_presets(req: SavePresetsRequest):
+    user_presets[get_user(req.session_token)] = [p.model_dump() for p in req.presets]
+    save_json_db(PRESETS_FILE, user_presets); return {"status": "success"}
+
+@app.post("/api/get_settings")
+def get_settings(req: BaseAuthReq):
+    u_settings = user_settings.get(get_user(req.session_token), {})
+    return {
+        "status": "success", 
+        "selected_rooms": u_settings.get("selected_rooms", list(ROOMS.values())),
+        "active_formats": u_settings.get("active_formats", {"isPko": True, "isFreezeout": True, "isTurbo": True}),
+        "is_compact": u_settings.get("is_compact", False),
+        "sort_order": u_settings.get("sort_order", "time")
+    }
+
+@app.post("/api/save_settings")
+def save_settings(req: SaveSettingsRequest):
+    u = get_user(req.session_token)
+    if u not in user_settings: user_settings[u] = {}
+    user_settings[u]["selected_rooms"] = req.selected_rooms
+    user_settings[u]["active_formats"] = req.active_formats
+    user_settings[u]["is_compact"] = req.is_compact
+    user_settings[u]["sort_order"] = req.sort_order
+    save_json_db(SETTINGS_FILE, user_settings)
+    return {"status": "success"}
+
+@app.post("/api/get_notes")
+def get_notes(req: BaseAuthReq): return {"status": "success", "notes": user_notes.get(get_user(req.session_token), {})}
+@app.post("/api/save_notes")
+def save_notes(req: SaveNotesRequest):
+    user_notes[get_user(req.session_token)] = req.notes
+    save_json_db(NOTES_FILE, user_notes); return {"status": "success"}
+
+@app.post("/api/get_sessions_history")
+def get_sessions_history(req: BaseAuthReq): return {"status": "success", "history": user_sessions_history.get(get_user(req.session_token), [])}
+@app.post("/api/save_session_history")
+def save_session_history(req: SaveSessionHistoryRequest):
+    u = get_user(req.session_token)
+    if u not in user_sessions_history: user_sessions_history[u] = []
+    user_sessions_history[u].append(req.session_data.model_dump())
+    save_json_db(SESSIONS_HISTORY_FILE, user_sessions_history); return {"status": "success"}
+
+@app.post("/api/clear_sessions_history")
+def clear_sessions_history(req: ClearSessionHistoryRequest):
+    u = get_user(req.session_token)
+    user_sessions_history[u] = []
+    save_json_db(SESSIONS_HISTORY_FILE, user_sessions_history)
+    return {"status": "success"}
+
+@app.post("/api/get_grid")
+def get_grid(req: BaseAuthReq):
+    return {"status": "success", "grid": user_grid.get(get_user(req.session_token), [])}
+@app.post("/api/save_grid")
+def save_grid(req: SaveGridRequest):
+    user_grid[get_user(req.session_token)] = req.grid
+    save_json_db(GRID_FILE, user_grid)
+    return {"status": "success"}
+
+@app.post("/api/get_balances")
+def get_balances(req: BaseAuthReq):
+    return {"status": "success", "balances": user_balances.get(get_user(req.session_token), {})}
+@app.post("/api/save_balances")
+def save_balances(req: SaveBalancesRequest):
+    user_balances[get_user(req.session_token)] = req.balances
+    save_json_db(BALANCES_FILE, user_balances)
+    return {"status": "success"}
 
 # === ТУРНИРЫ ===
 @app.post("/api/tournaments")
@@ -126,11 +266,15 @@ def fetch_tournaments(filters: FiltersRequest):
     base_domain = session_to_domain.get(filters.session_token, "https://globusmvp.co")
     target_url = f"{base_domain}/tournament-selector/index-selector-player-old"
 
+    # Определяем ранг в зависимости от домена (для основы — 15, для старого — 16)
+    current_rang = "15" if "globusmvp.co" in base_domain else "16"
+    current_tz = "Europe/Athens" if "globusmvp.co" in base_domain else "Asia/Amman"
+
     params = [
         ('DailyTournamentAutoPlayerSearchOld[dateFrom]', format_date_for_target(filters.date_from)),
         ('DailyTournamentAutoPlayerSearchOld[dateTo]', format_date_for_target(filters.date_to)),
-        ('DailyTournamentAutoPlayerSearchOld[timeZone]', 'Europe/Athens'),
-        ('DailyTournamentAutoPlayerSearchOld[rang]', '15'),
+        ('DailyTournamentAutoPlayerSearchOld[timeZone]', current_tz),
+        ('DailyTournamentAutoPlayerSearchOld[rang]', current_rang),
         ('DailyTournamentAutoPlayerSearchOld[endSessionAt]', ''),
         ('DailyTournamentAutoPlayerSearchOld[buyInFrom]', ''),
         ('DailyTournamentAutoPlayerSearchOld[afsFrom]', ''),
