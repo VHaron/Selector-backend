@@ -65,12 +65,22 @@ user_sessions_history = load_json_db(SESSIONS_HISTORY_FILE)
 user_grid = load_json_db(GRID_FILE)
 user_balances = load_json_db(BALANCES_FILE)
 
-ROOMS = {
+# Словари румов для разных доменов
+OLD_ROOMS = {
     '888Poker': '244', 'Chico': '245', 'GGNetwork': '246',
     'iPoker': '247', 'PartyPoker': '248', 'PokerStars': '249',
     'PokerStars(FR-ES-PT)': '250', 'Winamax.fr': '251', 'WPN': '252',
     'Pokerdom': '264', 'WPTGLobal': '266', 'CoinPoker': '265'
 }
+
+NEW_ROOMS = {
+    '888Poker': '421', 'Chico': '422', 'GGNetwork': '423',
+    'iPoker': '424', 'PartyPoker': '425', 'PokerStars': '426',
+    'PokerStars(FR-ES-PT)': '427', 'Winamax.fr': '428', 'WPN': '429',
+    'Pokerdom': '430', 'WPTGLobal': '431', 'CoinPoker': '432'
+}
+
+ROOMS = NEW_ROOMS # дефолт
 
 # === СХЕМЫ ===
 class BaseAuthReq(BaseModel): session_token: str
@@ -104,9 +114,7 @@ class SaveBalancesRequest(BaseAuthReq): balances: Dict[str, float]
 
 def format_date_for_target(dt_str: str) -> str:
     if not dt_str: return ""
-    # Если фронтенд или браузер уже шлют нормальный формат с T — оставляем как есть
-    if "T" in dt_str:
-        return dt_str.strip()
+    if "T" in dt_str: return dt_str.strip()
     try:
         clean_str = dt_str.strip()
         if "." in clean_str:
@@ -283,18 +291,39 @@ def fetch_tournaments(filters: FiltersRequest):
         ('DailyTournamentAutoPlayerSearchOld[afsFrom]', ''),
         ('DailyTournamentAutoPlayerSearchOld[buyInTo]', ''),
         ('DailyTournamentAutoPlayerSearchOld[afsTo]', ''),
+        ('DailyTournamentAutoPlayerSearchOld[isFreezeout]', '0'),
+        ('DailyTournamentAutoPlayerSearchOld[isFreezeout]', '1'),
+        ('DailyTournamentAutoPlayerSearchOld[isPko]', '0'),
+        ('DailyTournamentAutoPlayerSearchOld[isPko]', '1'),
+        ('DailyTournamentAutoPlayerSearchOld[isTurbo]', '0'),
+        ('DailyTournamentAutoPlayerSearchOld[isTurbo]', '1'),
+        ('DailyTournamentAutoPlayerSearchOld[isHyperTurbo]', '0'),
+        ('DailyTournamentAutoPlayerSearchOld[isHyperTurbo]', '1'),
+        ('DailyTournamentAutoPlayerSearchOld[is6MaxTurboPko]', '0'),
+        ('DailyTournamentAutoPlayerSearchOld[is6MaxTurboPko]', '1'),
+        ('DailyTournamentAutoPlayerSearchOld[isSeries]', '0'),
+        ('DailyTournamentAutoPlayerSearchOld[isSeries]', '1'),
+        ('DailyTournamentAutoPlayerSearchOld[priority1]', '0'),
+        ('DailyTournamentAutoPlayerSearchOld[priority1]', '1'),
+        ('DailyTournamentAutoPlayerSearchOld[priority2]', '0'),
+        ('DailyTournamentAutoPlayerSearchOld[priority2]', '1'),
+        ('DailyTournamentAutoPlayerSearchOld[priority3]', '0'),
+        ('DailyTournamentAutoPlayerSearchOld[priority3]', '1'),
         ('formChanged', '1'), ('per-page', '1000'), ('page', '1')
     ]
-    for key, val in filters.structs.model_dump().items():
-        params.append((f'DailyTournamentAutoPlayerSearchOld[{key}]', '0'))
-        if val == '1': params.append((f'DailyTournamentAutoPlayerSearchOld[{key}]', '1'))
-    for key, val in filters.priorities.model_dump().items():
-        params.append((f'DailyTournamentAutoPlayerSearchOld[{key}]', '0'))
-        if val == '1': params.append((f'DailyTournamentAutoPlayerSearchOld[{key}]', '1'))
-        
+    
     params.append(('DailyTournamentAutoPlayerSearchOld[networksIds]', ''))
     
-    active_rooms = filters.rooms if filters.rooms else list(ROOMS.values())
+    # Динамический выбор словаря ID в зависимости от домена
+    active_dict = NEW_ROOMS if "globusmvp.co" in base_domain else OLD_ROOMS
+    active_rooms = filters.rooms if filters.rooms else list(active_dict.values())
+    
+    # Страховка на случай, если прилетели ID от другого домена
+    if "globusmvp.co" in base_domain:
+        active_rooms = [active_dict.get(k, r) for r in active_rooms for k, v in OLD_ROOMS.items() if v == r] or list(NEW_ROOMS.values())
+    else:
+        active_rooms = [OLD_ROOMS.get(k, r) for r in active_rooms for k, v in NEW_ROOMS.items() if v == r] or list(OLD_ROOMS.values())
+
     for room_id in active_rooms: 
         params.append(('DailyTournamentAutoPlayerSearchOld[networksIds][]', room_id))
 
