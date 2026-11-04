@@ -75,7 +75,7 @@ ROOMS = {
     '888Poker': '244', 'Chico': '245', 'GGNetwork': '246',
     'iPoker': '247', 'PartyPoker': '248', 'PokerStars': '249',
     'PokerStars(FR-ES-PT)': '250', 'Winamax.fr': '251', 'WPN': '252',
-    'Pokerdom': '264', 'WPTGLobal': '266', 'CoinPoker': '265',
+    'Pokerdom': '264', 'CoinPoker': '265',
     'ClubGG': '267', 'WPT': '268'
 }
 
@@ -321,7 +321,7 @@ ROOM_ALIASES = {
     "248": ("partypoker", "party poker"), "249": ("pokerstars.com", "pokerstars (com)", "ps(com)"),
     "250": ("pokerstars.fr", "pokerstars.es", "pokerstars.pt", "ps(es)", "ps(fr)"),
     "251": ("winamax",), "252": ("wpn", "americas cardroom", "acr"),
-    "264": ("pokerdom",), "266": ("wptglobal", "wpt global"), "265": ("coinpoker", "coin poker"),
+    "264": ("pokerdom",), "265": ("coinpoker", "coin poker"),
     "267": ("clubgg", "club gg"), "268": ("wpt",),
 }
 
