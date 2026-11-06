@@ -8,10 +8,13 @@ import threading
 import uvicorn
 import uuid
 import json
+import logging
+import tempfile
+import time
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Dict, Any
 
 # force deploy
@@ -28,10 +31,30 @@ if bot:
         markup.add(InlineKeyboardButton("🚀 Открыть селектор MVP", web_app=webapp_info))
         bot.send_message(message.chat.id, "Привет! Селектор готов к работе:", reply_markup=markup)
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Verify upstream TLS certificates by default. Set UPSTREAM_TLS_VERIFY=false only
+# as a temporary workaround if an upstream certificate is genuinely broken.
+UPSTREAM_TLS_VERIFY = os.getenv("UPSTREAM_TLS_VERIFY", "true").strip().lower() not in {"0", "false", "no"}
+if not UPSTREAM_TLS_VERIFY:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("mvp_selector")
 
 app = FastAPI(title="MVP Selector API")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+# The frontend sends bearer-like session tokens in JSON bodies, not cookies.
+# Credentialed wildcard CORS is unnecessary and is rejected by browsers.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",") if origin.strip()],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
 
 # === БАЗЫ ДАННЫХ (в JSON) ===
 sessions: dict[str, requests.Session] = {}
@@ -43,6 +66,8 @@ session_mfa_url: dict[str, str] = {}
 # to the browser until the user has selected a site.
 site_selection_groups: dict[str, dict[str, Any]] = {}
 auth_state_lock = threading.RLock()
+db_lock = threading.RLock()
+SITE_SELECTION_TTL_SECONDS = 300
 
 SITE_BASES = {"globusgo": "https://globusgo.pro", "globusmvp": "https://globusmvp.co"}
 
@@ -60,18 +85,40 @@ BALANCES_FILE = get_db_path("balances_db.json")
 
 
 def load_json_db(file_path):
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
+    """Load a JSON object; a damaged or missing file starts with an empty store."""
+    if not os.path.exists(file_path):
+        return {}
+    try:
+        with open(file_path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        if not isinstance(data, dict):
+            logger.warning("Ignoring %s: expected a JSON object", file_path)
             return {}
-    return {}
+        return data
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.exception("Could not load %s: %s", file_path, exc)
+        return {}
 
 
 def save_json_db(file_path, data):
-    with open(file_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """Write atomically so a restart cannot leave a partially-written JSON file."""
+    directory = os.path.dirname(os.path.abspath(file_path))
+    os.makedirs(directory, exist_ok=True)
+    with db_lock:
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=directory,
+                prefix=".db-", suffix=".tmp", delete=False
+            ) as file:
+                temp_path = file.name
+                json.dump(data, file, ensure_ascii=False, indent=2)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temp_path, file_path)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
 
 
 user_presets = load_json_db(PRESETS_FILE)
@@ -129,9 +176,9 @@ class FiltersRequest(BaseAuthReq):
     date_from: str = ''
     date_to: str = ''
     # Frontend sends canonical GlobusGo room IDs; they are translated to each site's own IDs.
-    rooms: list[str] = list(ROOMS.values())
-    structs: StructsFilter = StructsFilter()
-    priorities: PrioritiesFilter = PrioritiesFilter()
+    rooms: list[str] = Field(default_factory=lambda: list(ROOMS.values()))
+    structs: StructsFilter = Field(default_factory=StructsFilter)
+    priorities: PrioritiesFilter = Field(default_factory=PrioritiesFilter)
 
 
 class PresetData(BaseModel):
@@ -145,7 +192,7 @@ class SavePresetsRequest(BaseAuthReq):
 
 class SaveSettingsRequest(BaseAuthReq):
     selected_rooms: list[str]
-    active_formats: dict = {"isPko": True, "isFreezeout": True, "isTurbo": True}
+    active_formats: dict = Field(default_factory=lambda: {"isPko": True, "isFreezeout": True, "isTurbo": True})
     is_compact: bool = False
     sort_order: str = "time"
 
@@ -182,13 +229,13 @@ class SaveBalancesRequest(BaseAuthReq):
 def format_date_for_target(dt_str: str) -> str:
     if not dt_str:
         return ""
+    normalized = dt_str.strip().replace("T", " ")
     try:
-        clean_str = dt_str.replace("T", " ")
-        date_part, time_part = clean_str.split(" ")
-        y, m, d = date_part.split("-")
-        return f"{d}.{m}.{y} {time_part}"
-    except:
-        return dt_str.replace("T", " ")
+        parsed = datetime.fromisoformat(normalized)
+        return parsed.strftime("%d.%m.%Y %H:%M:%S")
+    except ValueError:
+        # Preserve the old pass-through fallback for values supplied by older clients.
+        return normalized
 
 
 def _close_session_token(token: str):
@@ -213,14 +260,28 @@ def _discard_selection_group(selection_id: str):
             _close_session_token(token)
 
 
+def _cleanup_expired_site_selections():
+    """Close temporary login sessions when a user abandons the site chooser."""
+    now = time.monotonic()
+    with auth_state_lock:
+        expired_ids = [
+            selection_id
+            for selection_id, group in site_selection_groups.items()
+            if now - group.get("created_at", now) > SITE_SELECTION_TTL_SECONDS
+        ]
+    for selection_id in expired_ids:
+        _discard_selection_group(selection_id)
+
+
 def get_user(token: str):
-    if token not in sessions:
-        raise HTTPException(status_code=401, detail="Сессия не найдена.")
-    username = session_to_user.get(token)
+    with auth_state_lock:
+        if token not in sessions:
+            raise HTTPException(status_code=401, detail="Сессия не найдена.")
+        username = session_to_user.get(token)
+        site = session_to_site.get(token, "globusgo")
     if not username:
         raise HTTPException(status_code=400, detail="Пользователь не найден")
     # Keep existing GlobusGo profile keys intact; isolate GlobusMVP data.
-    site = session_to_site.get(token, "globusgo")
     return username if site == "globusgo" else f"{site}:{username}"
 
 
@@ -235,7 +296,7 @@ def _csrf_from_page(html: str) -> str:
 def _try_site_login(req: LoginRequest, site: str):
     base = SITE_BASES[site]
     user_session = requests.Session()
-    user_session.verify = False
+    user_session.verify = UPSTREAM_TLS_VERIFY
     user_session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
         "Referer": f"{base}/site/login",
@@ -298,6 +359,7 @@ def _try_site_login(req: LoginRequest, site: str):
 # === ЭНДПОИНТЫ АВТОРИЗАЦИИ ===
 @app.post("/api/login")
 def login(req: LoginRequest):
+    _cleanup_expired_site_selections()
     requested_site = (req.site or "auto").lower()
     if requested_site not in ("auto", *SITE_BASES.keys()):
         raise HTTPException(status_code=400, detail="Неизвестный сайт авторизации")
@@ -351,6 +413,7 @@ def login(req: LoginRequest):
         site_selection_groups[selection_id] = {
             "username": req.username,
             "tokens": token_map,
+            "created_at": time.monotonic(),
         }
 
     return {
@@ -365,6 +428,7 @@ def login(req: LoginRequest):
 
 @app.post("/api/select_site")
 def select_site(req: SiteSelectionRequest):
+    _cleanup_expired_site_selections()
     site = (req.site or "").lower()
     if site not in SITE_BASES:
         raise HTTPException(status_code=400, detail="Неизвестный сайт авторизации")
@@ -396,12 +460,14 @@ def select_site(req: SiteSelectionRequest):
 
 @app.post("/api/mfa")
 def verify_mfa(req: MFARequest):
-    user_session = sessions.get(req.session_token)
+    with auth_state_lock:
+        user_session = sessions.get(req.session_token)
+        site = session_to_site.get(req.session_token, "globusgo")
+        mfa_url = session_mfa_url.get(req.session_token)
     if not user_session:
         raise HTTPException(status_code=401, detail="Сессия авторизации истекла. Войдите заново.")
-    site = session_to_site.get(req.session_token, "globusgo")
     base = SITE_BASES[site]
-    mfa_url = session_mfa_url.get(req.session_token, f"{base}/site/mfa-verify")
+    mfa_url = mfa_url or f"{base}/site/mfa-verify"
     try:
         response = user_session.get(mfa_url, timeout=25)
         csrf_value = _csrf_from_page(response.text)
@@ -435,8 +501,9 @@ def get_presets(req: BaseAuthReq):
 
 @app.post("/api/save_presets")
 def save_presets(req: SavePresetsRequest):
-    user_presets[get_user(req.session_token)] = [p.model_dump() for p in req.presets]
-    save_json_db(PRESETS_FILE, user_presets)
+    with db_lock:
+        user_presets[get_user(req.session_token)] = [p.model_dump() for p in req.presets]
+        save_json_db(PRESETS_FILE, user_presets)
     return {"status": "success"}
 
 
@@ -455,13 +522,14 @@ def get_settings(req: BaseAuthReq):
 @app.post("/api/save_settings")
 def save_settings(req: SaveSettingsRequest):
     u = get_user(req.session_token)
-    if u not in user_settings:
-        user_settings[u] = {}
-    user_settings[u]["selected_rooms"] = req.selected_rooms
-    user_settings[u]["active_formats"] = req.active_formats
-    user_settings[u]["is_compact"] = req.is_compact
-    user_settings[u]["sort_order"] = req.sort_order
-    save_json_db(SETTINGS_FILE, user_settings)
+    with db_lock:
+        if u not in user_settings:
+            user_settings[u] = {}
+        user_settings[u]["selected_rooms"] = req.selected_rooms
+        user_settings[u]["active_formats"] = req.active_formats
+        user_settings[u]["is_compact"] = req.is_compact
+        user_settings[u]["sort_order"] = req.sort_order
+        save_json_db(SETTINGS_FILE, user_settings)
     return {"status": "success"}
 
 
@@ -472,8 +540,9 @@ def get_notes(req: BaseAuthReq):
 
 @app.post("/api/save_notes")
 def save_notes(req: SaveNotesRequest):
-    user_notes[get_user(req.session_token)] = req.notes
-    save_json_db(NOTES_FILE, user_notes)
+    with db_lock:
+        user_notes[get_user(req.session_token)] = req.notes
+        save_json_db(NOTES_FILE, user_notes)
     return {"status": "success"}
 
 
@@ -485,18 +554,18 @@ def get_sessions_history(req: BaseAuthReq):
 @app.post("/api/save_session_history")
 def save_session_history(req: SaveSessionHistoryRequest):
     u = get_user(req.session_token)
-    if u not in user_sessions_history:
-        user_sessions_history[u] = []
-    user_sessions_history[u].append(req.session_data.model_dump())
-    save_json_db(SESSIONS_HISTORY_FILE, user_sessions_history)
+    with db_lock:
+        user_sessions_history.setdefault(u, []).append(req.session_data.model_dump())
+        save_json_db(SESSIONS_HISTORY_FILE, user_sessions_history)
     return {"status": "success"}
 
 
 @app.post("/api/clear_sessions_history")
 def clear_sessions_history(req: ClearSessionHistoryRequest):
     u = get_user(req.session_token)
-    user_sessions_history[u] = []
-    save_json_db(SESSIONS_HISTORY_FILE, user_sessions_history)
+    with db_lock:
+        user_sessions_history[u] = []
+        save_json_db(SESSIONS_HISTORY_FILE, user_sessions_history)
     return {"status": "success"}
 
 
@@ -507,8 +576,9 @@ def get_grid(req: BaseAuthReq):
 
 @app.post("/api/save_grid")
 def save_grid(req: SaveGridRequest):
-    user_grid[get_user(req.session_token)] = req.grid
-    save_json_db(GRID_FILE, user_grid)
+    with db_lock:
+        user_grid[get_user(req.session_token)] = req.grid
+        save_json_db(GRID_FILE, user_grid)
     return {"status": "success"}
 
 
@@ -519,8 +589,9 @@ def get_balances(req: BaseAuthReq):
 
 @app.post("/api/save_balances")
 def save_balances(req: SaveBalancesRequest):
-    user_balances[get_user(req.session_token)] = req.balances
-    save_json_db(BALANCES_FILE, user_balances)
+    with db_lock:
+        user_balances[get_user(req.session_token)] = req.balances
+        save_json_db(BALANCES_FILE, user_balances)
     return {"status": "success"}
 
 
@@ -593,10 +664,11 @@ def _resolve_room_ids(soup: BeautifulSoup, requested_ids: list[str], site: str) 
 # === ТУРНИРЫ ===
 @app.post("/api/tournaments")
 def fetch_tournaments(filters: FiltersRequest):
-    user_session = sessions.get(filters.session_token)
+    with auth_state_lock:
+        user_session = sessions.get(filters.session_token)
+        site = session_to_site.get(filters.session_token, "globusgo")
     if not user_session:
         raise HTTPException(status_code=401, detail="Сессия не найдена")
-    site = session_to_site.get(filters.session_token, "globusgo")
     base = SITE_BASES[site]
 
     params = [
