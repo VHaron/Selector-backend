@@ -202,13 +202,12 @@ def api_build_smart_grid(req: SmartGridRequest):
     base = SITE_BASES[site]
 
     try:
-        # Получаем полный список турниров с учетом выбранных румов через штатную логику парсера
-        # Формируем базовый запрос к селектору без жестких дат, чтобы забрать все доступные турниры диапазона
         selector_url = f"{base}/tournament-selector/index-selector-player-old"
         page_response = user_session.get(selector_url, timeout=30)
         page_soup = BeautifulSoup(page_response.text, 'html.parser')
         site_room_ids = _resolve_room_ids(page_soup, req.rooms, site)
 
+        # Запрашиваем сразу до 1000 турниров, чтобы перекрыть все страницы
         params = [
             ('DailyTournamentAutoPlayerSearchOld[dateFrom]', ''),
             ('DailyTournamentAutoPlayerSearchOld[dateTo]', ''),
@@ -266,7 +265,7 @@ def api_build_smart_grid(req: SmartGridRequest):
                     'afs': cols[12].text.strip()
                 })
 
-        # Прогоняем через математический оптимизатор таймлайна
+        # Прогоняем через математический оптимизатор по всем собранным турнирам
         optimal_grid = build_smart_grid(
             tournaments=all_tournaments,
             budget=req.budget,
