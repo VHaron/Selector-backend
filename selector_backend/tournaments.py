@@ -1,9 +1,13 @@
 from datetime import datetime
 from bs4 import BeautifulSoup
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
+
 from .config import SITE_BASES, ROOMS
 from .models import FiltersRequest
-from .state import sessions, session_to_site, auth_state_lock
+from .state import sessions, session_to_site, auth_state_lock, sessions as global_sessions
+from .smart_builder import build_smart_grid
 
 router = APIRouter()
 
@@ -41,7 +45,6 @@ def _canonical_room_id(label: str):
     for canonical_id, aliases in ROOM_ALIASES.items():
         if any(alias in value for alias in aliases):
             return canonical_id
-    # Exact canonical labels are useful on GlobusGo and on pages with short labels.
     for canonical_id, room_label in {v: k for k, v in ROOMS.items()}.items():
         if value == room_label.lower():
             return canonical_id
@@ -53,7 +56,6 @@ def _resolve_room_ids(soup: BeautifulSoup, requested_ids: list[str], site: str) 
     if not requested:
         return []
     found = {}
-    # The selector may render the room filter as a multi-select or as checkboxes.
     for option in soup.find_all("option"):
         canonical = _canonical_room_id(option.get_text(" ", strip=True))
         value = option.get("value")
@@ -75,7 +77,6 @@ def _resolve_room_ids(soup: BeautifulSoup, requested_ids: list[str], site: str) 
         if canonical in requested and field.get("value"):
             found[canonical] = field.get("value")
     if site == "globusgo":
-        # Preserve the original site's established IDs as a compatibility fallback.
         for room_id in requested:
             found.setdefault(room_id, room_id)
     if not found and site == "globusmvp":
@@ -115,8 +116,6 @@ def fetch_tournaments(filters: FiltersRequest):
             params.append((f'DailyTournamentAutoPlayerSearchOld[{key}]', '1'))
     try:
         selector_url = f"{base}/tournament-selector/index-selector-player-old"
-        # Read the authenticated selector first: room IDs are site-specific and must not
-        # be copied from GlobusGo to GlobusMVP.
         page_response = user_session.get(selector_url, timeout=30)
         if "/site/login" in page_response.url.lower():
             raise HTTPException(status_code=401, detail="Авторизация на исходном сайте истекла")
@@ -145,13 +144,10 @@ def fetch_tournaments(filters: FiltersRequest):
                 if 'Ничего не найдено' in room_text:
                     continue
 
-                # Определяем PS(ES) и PS(COM) по фактическому названию из парсера
                 room = room_text
                 room_lower = room_text.lower()
 
-                # Сначала убеждаемся, что это вообще семейство PokerStars
                 if 'pokerstars' in room_lower or 'ps' in room_lower:
-                    # И только теперь проверяем, Европа это или COM
                     if 'es' in room_lower or 'fr' in room_lower or 'pt' in room_lower:
                         room = "PS(ES)"
                     else:
@@ -181,6 +177,105 @@ def fetch_tournaments(filters: FiltersRequest):
                     'afs': cols[12].text.strip()
                 })
         return {"status": "success", "data": tournaments}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# === НОВЫЙ ЭНДПОИНТ: ИИ-АВТОСБОРКА СЕТКИ ===
+class SmartGridRequest(BaseModel):
+    session_token: str
+    budget: float
+    max_tables: int
+    start_time: str
+    end_time: str
+    rooms: List[str]
+
+@router.post("/api/build_smart_grid")
+def api_build_smart_grid(req: SmartGridRequest):
+    with auth_state_lock:
+        user_session = sessions.get(req.session_token)
+        site = session_to_site.get(req.session_token, "globusgo")
+    if not user_session:
+        raise HTTPException(status_code=401, detail="Сессия не найдена")
+    base = SITE_BASES[site]
+
+    try:
+        # Получаем полный список турниров с учетом выбранных румов через штатную логику парсера
+        # Формируем базовый запрос к селектору без жестких дат, чтобы забрать все доступные турниры диапазона
+        selector_url = f"{base}/tournament-selector/index-selector-player-old"
+        page_response = user_session.get(selector_url, timeout=30)
+        page_soup = BeautifulSoup(page_response.text, 'html.parser')
+        site_room_ids = _resolve_room_ids(page_soup, req.rooms, site)
+
+        params = [
+            ('DailyTournamentAutoPlayerSearchOld[dateFrom]', ''),
+            ('DailyTournamentAutoPlayerSearchOld[dateTo]', ''),
+            ('DailyTournamentAutoPlayerSearchOld[timeZone]', 'Asia/Amman'),
+            ('DailyTournamentAutoPlayerSearchOld[rang]', '16'),
+            ('DailyTournamentAutoPlayerSearchOld[endSessionAt]', ''),
+            ('DailyTournamentAutoPlayerSearchOld[buyInFrom]', ''),
+            ('DailyTournamentAutoPlayerSearchOld[afsFrom]', ''),
+            ('DailyTournamentAutoPlayerSearchOld[buyInTo]', ''),
+            ('DailyTournamentAutoPlayerSearchOld[afsTo]', ''),
+            ('formChanged', '1'), ('per-page', '1000'), ('page', '1')
+        ]
+        params.append(('DailyTournamentAutoPlayerSearchOld[networksIds]', ''))
+        for room_id in site_room_ids:
+            params.append(('DailyTournamentAutoPlayerSearchOld[networksIds][]', room_id))
+
+        response = user_session.get(selector_url, params=params, timeout=45)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        target_table = None
+        for table in soup.find_all('table'):
+            if 'Название' in table.text and 'ABI' in table.text:
+                target_table = table
+                break
+        
+        if not target_table:
+            return {"status": "success", "grid": []}
+
+        all_tournaments = []
+        for row in target_table.find_all('tr')[1:]:
+            cols = row.find_all('td')
+            if len(cols) >= 13:
+                room_text = cols[0].text.strip()
+                if 'Ничего не найдено' in room_text:
+                    continue
+                room = room_text
+                room_lower = room_text.lower()
+                if 'pokerstars' in room_lower or 'ps' in room_lower:
+                    if 'es' in room_lower or 'fr' in room_lower or 'pt' in room_lower:
+                        room = "PS(ES)"
+                    else:
+                        room = "PS(COM)"
+
+                all_tournaments.append({
+                    'id': f"{site}_{cols[5].text.strip()}_{cols[1].text.strip()}",
+                    'source': site,
+                    'room': room,
+                    'name': cols[1].text.strip(),
+                    'priority': cols[2].text.strip(),
+                    'buyin': cols[3].text.strip(),
+                    'reentry': cols[4].text.strip(),
+                    'time_start': cols[5].text.strip(),
+                    'ev_mtt': cols[7].text.strip(),
+                    'duration': cols[10].text.strip(),
+                    'gtd': cols[11].text.strip(),
+                    'afs': cols[12].text.strip()
+                })
+
+        # Прогоняем через математический оптимизатор таймлайна
+        optimal_grid = build_smart_grid(
+            tournaments=all_tournaments,
+            budget=req.budget,
+            max_tables=req.max_tables,
+            start_time_str=req.start_time,
+            end_time_str=req.end_time
+        )
+        
+        return {"status": "success", "grid": optimal_grid}
     except HTTPException:
         raise
     except Exception as e:
