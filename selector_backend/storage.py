@@ -14,6 +14,7 @@ SETTINGS_FILE = get_db_path("settings_db.json")
 NOTES_FILE = get_db_path("notes_db.json")
 SESSIONS_HISTORY_FILE = get_db_path("sessions_history_db.json")
 GRID_FILE = get_db_path("grid_db.json")
+SAVED_GRIDS_FILE = get_db_path("saved_grids_db.json")
 BALANCES_FILE = get_db_path("balances_db.json")
 
 def load_json_db(file_path):
@@ -53,4 +54,5 @@ user_settings = load_json_db(SETTINGS_FILE)
 user_notes = load_json_db(NOTES_FILE)
 user_sessions_history = load_json_db(SESSIONS_HISTORY_FILE)
 user_grid = load_json_db(GRID_FILE)
+user_saved_grids = load_json_db(SAVED_GRIDS_FILE)
 user_balances = load_json_db(BALANCES_FILE)

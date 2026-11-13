@@ -1,11 +1,11 @@
 from fastapi import APIRouter
 from .config import ROOMS
 from .models import (BaseAuthReq, SavePresetsRequest, SaveSettingsRequest, SaveNotesRequest,
-                     SaveSessionHistoryRequest, ClearSessionHistoryRequest, SaveGridRequest, SaveBalancesRequest)
+                     SaveSessionHistoryRequest, ClearSessionHistoryRequest, SaveGridRequest, SaveNamedGridRequest, SaveBalancesRequest)
 from .state import get_user
 from .storage import (db_lock, save_json_db, PRESETS_FILE, SETTINGS_FILE, NOTES_FILE,
-                      SESSIONS_HISTORY_FILE, GRID_FILE, BALANCES_FILE, user_presets, user_settings,
-                      user_notes, user_sessions_history, user_grid, user_balances)
+                      SESSIONS_HISTORY_FILE, GRID_FILE, SAVED_GRIDS_FILE, BALANCES_FILE, user_presets, user_settings,
+                      user_notes, user_sessions_history, user_grid, user_saved_grids, user_balances)
 
 router = APIRouter()
 
@@ -96,6 +96,23 @@ def save_grid(req: SaveGridRequest):
         user_grid[get_user(req.session_token)] = req.grid
         save_json_db(GRID_FILE, user_grid)
     return {"status": "success"}
+
+
+@router.post("/api/get_saved_grids")
+def get_saved_grids(req: BaseAuthReq):
+    return {"status": "success", "saved_grids": user_saved_grids.get(get_user(req.session_token), {})}
+
+
+@router.post("/api/save_named_grid")
+def save_named_grid(req: SaveNamedGridRequest):
+    name = req.name.strip()
+    if not name:
+        return {"status": "error", "detail": "Укажите название сетки"}
+    with db_lock:
+        saved = user_saved_grids.setdefault(get_user(req.session_token), {})
+        saved[name] = req.grid
+        save_json_db(SAVED_GRIDS_FILE, user_saved_grids)
+    return {"status": "success", "saved_grids": saved}
 
 
 @router.post("/api/get_balances")
