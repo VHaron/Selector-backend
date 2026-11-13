@@ -86,6 +86,11 @@ class SaveGridRequest(BaseAuthReq):
     grid: List[Dict[str, Any]]
 
 
+class SaveNamedGridRequest(BaseAuthReq):
+    name: str = Field(min_length=1, max_length=80)
+    grid: List[Dict[str, Any]]
+
+
 class SaveBalancesRequest(BaseAuthReq):
     balances: Dict[str, float]
 
