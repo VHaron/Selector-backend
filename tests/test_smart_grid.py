@@ -61,6 +61,21 @@ class SmartGridOptimizerTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in result["selected"]], ["pko"])
         self.assertEqual(result["summary"]["selected_pko_count"], 1)
 
+    def test_yellow_pko_can_outrank_green_non_pko(self):
+        payload = dict(self.payload)
+        payload["settings"] = {**self.payload["settings"], "max_tables": 1}
+        base = {
+            "room": "GGNet", "buyin": "$2", "ev_mtt": "$1", "roi_str": "20%",
+            "duration": "1:00", "smart_start_at": "2026-11-14T19:00",
+            "gtd": "$100", "afs": "100",
+        }
+        payload["tournaments"] = [
+            {**base, "id": "green_regular", "name": "Regular", "priority": "1"},
+            {**base, "id": "yellow_pko", "name": "PKO", "priority": "2"},
+        ]
+        result = optimize_smart_grid(payload)
+        self.assertEqual([item["id"] for item in result["selected"]], ["yellow_pko"])
+
     def test_turbo_is_only_used_as_late_session_add_on(self):
         payload = dict(self.payload)
         payload["settings"] = {**self.payload["settings"], "max_tables": 1}
