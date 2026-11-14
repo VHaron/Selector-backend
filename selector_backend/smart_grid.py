@@ -103,12 +103,12 @@ def _score(t: dict, duration_minutes: float, buyin_usd: float) -> float:
     gtd = _number(t.get("gtd"))
     field = max(1.0, _number(t.get("afs")))
     overlay = min(1.0, gtd / max(1.0, buyin * field)) if gtd > 0 else 0.0
-    priority = {"1": 1.0, "2": 0.55, "3": 0.2}.get(str(t.get("priority", "3")), 0.0)
+    # Priority colors: 1 = green (preferred), 2 = yellow, 3 = red (fallback only).\n    priority = {"1": 1.0, "2": 0.35, "3": 0.0}.get(str(t.get("priority", "3")), 0.0)
     # EV is an available estimate, not a guaranteed or independently verified result.
     ev_ratio = max(-1.0, min(2.0, ev / buyin))
     roi_score = max(-1.0, min(2.0, roi))
     duration_score = max(0.0, 1.0 - duration_minutes / 600.0)
-    return ev_ratio * 35 + roi_score * 25 + overlay * 15 + priority * 15 + duration_score * 10
+    # Give the priority tier the dominant weight so green tournaments lead,\n    # yellow remain useful alternatives, and red are selected mainly when needed.\n    return ev_ratio * 10 + roi_score * 7 + overlay * 5 + priority * 65 + duration_score * 4
 
 
 def _peak_tables(intervals: list[tuple[datetime, datetime]]) -> int:
