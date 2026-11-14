@@ -70,7 +70,7 @@ def _duration_minutes(value: Any) -> float:
     hours = re.search(r"([\d.]+)\s*(?:h|час)", raw)
     minutes = re.search(r"([\d.]+)\s*(?:m|min|мин)", raw)
     if hours or minutes:
-        return float(hours.group(1)) * 60 if hours else 0.0 + (float(minutes.group(1)) if minutes else 0.0)
+        return (float(hours.group(1)) * 60 if hours else 0.0) + (float(minutes.group(1)) if minutes else 0.0)
     amount = _number(raw)
     return amount * 60 if amount > 0 else 0.0
 
