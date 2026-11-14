@@ -150,7 +150,7 @@ def optimize_smart_grid(payload: dict) -> dict:
     locked_intervals = []
     spent_locked = 0
     for item in locked:
-        start = _parse_datetime(item.get("time_start"))
+        start = _parse_datetime(item.get("smart_start_at") or item.get("time_start"))
         duration = durations[pool.index(item)] if item in pool else 0
         _, rate = _currency(item, settings)
         price = max(0, round(_number(item.get("buyin")) * rate * 100))
@@ -169,7 +169,7 @@ def optimize_smart_grid(payload: dict) -> dict:
         if identifier in seen:
             continue
         seen.add(identifier)
-        start = _parse_datetime(item.get("time_start"))
+        start = _parse_datetime(item.get("smart_start_at") or item.get("time_start"))
         duration = durations[index]
         _, rate = _currency(item, settings)
         price = round(_number(item.get("buyin")) * rate * 100)
@@ -180,7 +180,7 @@ def optimize_smart_grid(payload: dict) -> dict:
             continue
         if _number(item.get("buyin")) > 5.500001:
             continue
-        if price + spent_locked > budget:
+        if price / 100 > 5.500001 or price + spent_locked > budget:
             continue
         ranked.append({
             "item": item, "start": start, "end": end, "price": price,
@@ -233,7 +233,11 @@ def optimize_smart_grid(payload: dict) -> dict:
     for item in locked_items + [entry["item"] for entry in chosen]:
         room_counts[_room_group(item.get("room"))] += 1
     peak = _peak_tables(all_intervals)
-    selected = [entry["item"] for entry in sorted(chosen, key=lambda entry: entry["start"])]
+    selected = []
+    for entry in sorted(chosen, key=lambda entry: entry["start"]):
+        clean_item = dict(entry["item"])
+        clean_item.pop("smart_start_at", None)
+        selected.append(clean_item)
     end_at = max((end for _, end in all_intervals), default=None)
     return {
         "status": "success",
