@@ -109,9 +109,13 @@ def _score(t: dict, duration_minutes: float, buyin_usd: float) -> float:
     ev_ratio = max(-1.0, min(2.0, ev / buyin))
     roi_score = max(-1.0, min(2.0, roi))
     duration_score = max(0.0, 1.0 - duration_minutes / 600.0)
-    # Give the priority tier the dominant weight so green tournaments lead,
-    # yellow remain useful alternatives, and red are selected mainly when needed.
-    return ev_ratio * 10 + roi_score * 7 + overlay * 5 + priority * 65 + duration_score * 4
+    # PKO tournaments are preferred because their progressive bounty structure
+    # is a primary selection preference. Turbo formats are supplementary options.
+    is_pko, is_turbo, _ = _format_flags(t.get("name"))
+    pko_bonus = 32 if is_pko else 0
+    turbo_adjustment = -10 if is_turbo else 0
+    # Green priority remains the strongest single signal; PKO receives a substantial bonus.
+    return ev_ratio * 10 + roi_score * 7 + overlay * 5 + priority * 65 + duration_score * 4 + pko_bonus + turbo_adjustment
 
 
 def _peak_tables(intervals: list[tuple[datetime, datetime]]) -> int:
@@ -185,6 +189,10 @@ def optimize_smart_grid(payload: dict) -> dict:
     if spent_locked > budget:
         raise ValueError("Уже добавленные вручную турниры превышают указанный бюджет")
 
+    # Turbo and super-turbo events are a late-session add-on, not core early-session volume.
+    # Reserve the final 30% of the configured session for these faster formats.
+    late_phase_start = session_start + (session_end - session_start) * 0.70
+
     ranked = []
     seen = set()
     for index, item in enumerate(candidates):
@@ -200,6 +208,11 @@ def optimize_smart_grid(payload: dict) -> dict:
             continue
         end = start + timedelta(minutes=duration)
         if start < session_start or end > session_end:
+            continue
+        is_pko, is_turbo, _ = _format_flags(item.get("name"))
+        # Keep turbo / super-turbo out of the early schedule; they are only added
+        # during the final session phase as supplementary tables.
+        if is_turbo and start < late_phase_start:
             continue
         if price / 100 > 5.500001 or price + spent_locked > budget:
             continue
@@ -274,6 +287,8 @@ def optimize_smart_grid(payload: dict) -> dict:
             "candidates_considered": len(ranked),
             "candidates_rejected": max(0, len(candidates) - len(ranked)),
             "durations_inferred": inferred_duration_count,
+            "selected_pko_count": sum(1 for entry in chosen if _format_flags(entry["item"].get("name"))[0]),
+            "selected_turbo_count": sum(1 for entry in chosen if _format_flags(entry["item"].get("name"))[1]),
             "objective_score": round(score, 2),
             "optimizer": "beam-search-v1",
         },
