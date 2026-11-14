@@ -138,16 +138,32 @@ def optimize_smart_grid(payload: dict) -> dict:
 
     pool = candidates + locked
     durations: dict[int, float] = {}
-    by_room: dict[str, list[float]] = {}
-    for item in pool:
-        duration = _duration_minutes(item.get("duration"))
-        if duration > 0:
-            by_room.setdefault(str(item.get("room", "")).lower(), []).append(duration)
+    known_durations = [
+        (item, _duration_minutes(item.get("duration")))
+        for item in pool
+        if _duration_minutes(item.get("duration")) > 0
+    ]
+    inferred_duration_count = 0
     for index, item in enumerate(pool):
         duration = _duration_minutes(item.get("duration"))
         if duration <= 0:
-            room_values = by_room.get(str(item.get("room", "")).lower(), [])
-            duration = median(room_values) if room_values else 0
+            room_values = [
+                (other, known)
+                for other, known in known_durations
+                if str(other.get("room", "")).lower() == str(item.get("room", "")).lower()
+            ]
+            buyin = _number(item.get("buyin"))
+            formats = _format_flags(item.get("name"))
+            similar = [
+                known for other, known in room_values
+                if _format_flags(other.get("name")) == formats
+                and (buyin <= 0 or abs(_number(other.get("buyin")) - buyin) <= max(2, buyin * 0.5))
+            ]
+            fallback = [known for _, known in room_values]
+            source = similar if len(similar) >= 2 else fallback
+            duration = median(source) if source else 0
+            if duration > 0:
+                inferred_duration_count += 1
         durations[index] = duration
 
     locked_items = []
@@ -254,6 +270,7 @@ def optimize_smart_grid(payload: dict) -> dict:
             "room_counts": room_counts,
             "candidates_considered": len(ranked),
             "candidates_rejected": max(0, len(candidates) - len(ranked)),
+            "durations_inferred": inferred_duration_count,
             "objective_score": round(score, 2),
             "optimizer": "beam-search-v1",
         },
