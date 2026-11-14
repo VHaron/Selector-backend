@@ -6,6 +6,21 @@ class BaseAuthReq(BaseModel):
     session_token: str
 
 
+class SmartGridSettings(BaseModel):
+    budget_usd: float = Field(gt=0, le=100000)
+    max_tables: int = Field(ge=1, le=24)
+    session_start: str
+    session_end: str
+    usd_per_eur: float = Field(default=1.08, gt=0, le=100)
+    usd_per_rub: float = Field(default=0.011, gt=0, le=10)
+
+
+class SmartGridRequest(BaseAuthReq):
+    tournaments: List[Dict[str, Any]] = Field(default_factory=list, max_length=800)
+    locked: List[Dict[str, Any]] = Field(default_factory=list, max_length=300)
+    settings: SmartGridSettings
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
