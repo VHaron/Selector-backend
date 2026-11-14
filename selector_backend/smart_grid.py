@@ -36,7 +36,7 @@ def _currency(tournament: dict, settings: dict) -> tuple[str, float]:
     if any(x in source for x in ("₽", "rub", "руб")):
         return "RUB", float(settings.get("usd_per_rub", 0.011))
     room = str(tournament.get("room", "")).lower()
-    if any(x in room for x in ("winamax", "wmx", "ps(es)", "pokerstars.fr")):
+    if any(x in room for x in ("winamax", "wmx", "ps(es)", "pokerstars.fr", "ipoker", "redstar")):
         return "EUR", float(settings.get("usd_per_eur", 1.08))
     return "USD", 1.0
 
