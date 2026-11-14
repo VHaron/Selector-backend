@@ -178,8 +178,6 @@ def optimize_smart_grid(payload: dict) -> dict:
         end = start + timedelta(minutes=duration)
         if start < session_start or end > session_end:
             continue
-        if _number(item.get("buyin")) > 5.500001:
-            continue
         if price / 100 > 5.500001 or price + spent_locked > budget:
             continue
         ranked.append({
