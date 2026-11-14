@@ -45,6 +45,41 @@ class SmartGridOptimizerTests(unittest.TestCase):
         result = optimize_smart_grid(payload)
         self.assertEqual([item["id"] for item in result["selected"]], ["green"])
 
+    def test_pko_is_preferred_over_non_pko_when_otherwise_equal(self):
+        payload = dict(self.payload)
+        payload["settings"] = {**self.payload["settings"], "max_tables": 1}
+        base = {
+            "room": "GGNet", "buyin": "$2", "ev_mtt": "$1", "roi_str": "20%",
+            "priority": "1", "duration": "1:00", "smart_start_at": "2026-11-14T19:00",
+            "gtd": "$100", "afs": "100",
+        }
+        payload["tournaments"] = [
+            {**base, "id": "regular", "name": "Regular Freezeout"},
+            {**base, "id": "pko", "name": "Progressive KO"},
+        ]
+        result = optimize_smart_grid(payload)
+        self.assertEqual([item["id"] for item in result["selected"]], ["pko"])
+        self.assertEqual(result["summary"]["selected_pko_count"], 1)
+
+    def test_turbo_is_only_used_as_late_session_add_on(self):
+        payload = dict(self.payload)
+        payload["settings"] = {**self.payload["settings"], "max_tables": 1}
+        base = {
+            "room": "GGNet", "buyin": "$2", "ev_mtt": "$1", "roi_str": "20%",
+            "priority": "1", "duration": "1:00", "gtd": "$100", "afs": "100",
+        }
+        payload["tournaments"] = [
+            {**base, "id": "regular", "name": "Regular", "smart_start_at": "2026-11-14T18:00"},
+            {**base, "id": "early_turbo", "name": "Turbo", "smart_start_at": "2026-11-14T20:30"},
+            {**base, "id": "late_hyper", "name": "Hyper Turbo", "smart_start_at": "2026-11-15T00:30"},
+        ]
+        result = optimize_smart_grid(payload)
+        ids = {item["id"] for item in result["selected"]}
+        self.assertIn("regular", ids)
+        self.assertNotIn("early_turbo", ids)
+        self.assertIn("late_hyper", ids)
+        self.assertEqual(result["summary"]["selected_turbo_count"], 1)
+
     def test_locked_grid_is_preserved_and_counted(self):
         payload = dict(self.payload)
         payload["locked"] = [
