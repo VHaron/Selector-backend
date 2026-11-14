@@ -112,7 +112,7 @@ def _score(t: dict, duration_minutes: float, buyin_usd: float) -> float:
     # PKO tournaments are preferred because their progressive bounty structure
     # is a primary selection preference. Turbo formats are supplementary options.
     is_pko, is_turbo, _ = _format_flags(t.get("name"))
-    pko_bonus = 32 if is_pko else 0
+    pko_bonus = 45 if is_pko else 0
     turbo_adjustment = -10 if is_turbo else 0
     # Green priority remains the strongest single signal; PKO receives a substantial bonus.
     return ev_ratio * 10 + roi_score * 7 + overlay * 5 + priority * 65 + duration_score * 4 + pko_bonus + turbo_adjustment
