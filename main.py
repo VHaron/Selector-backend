@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from selector_backend.auth import router as auth_router
 from selector_backend.profile import router as profile_router
 from selector_backend.tournaments import router as tournaments_router
+from selector_backend.smart_grid_api import router as smart_grid_router
 
 # Keep Telegram credentials in Railway environment variables.
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -37,6 +38,7 @@ def health_check():
 app.include_router(auth_router)
 app.include_router(profile_router)
 app.include_router(tournaments_router)
+app.include_router(smart_grid_router)
 
 if __name__ == "__main__":
     if bot:
