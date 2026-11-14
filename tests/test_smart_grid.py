@@ -29,6 +29,22 @@ class SmartGridOptimizerTests(unittest.TestCase):
         self.assertLessEqual(result["summary"]["peak_tables"], 1)
         self.assertLessEqual(result["summary"]["spent_usd"], 10)
 
+    def test_priority_colors_prefer_green_then_yellow_over_red(self):
+        payload = dict(self.payload)
+        payload["settings"] = {**self.payload["settings"], "max_tables": 1}
+        base = {
+            "room": "GGNet", "name": "Same event", "buyin": "$2",
+            "ev_mtt": "$1", "roi_str": "20%", "duration": "2:00",
+            "smart_start_at": "2026-11-14T19:00", "gtd": "$100", "afs": "100",
+        }
+        payload["tournaments"] = [
+            {**base, "id": "red", "priority": "3"},
+            {**base, "id": "yellow", "priority": "2"},
+            {**base, "id": "green", "priority": "1"},
+        ]
+        result = optimize_smart_grid(payload)
+        self.assertEqual([item["id"] for item in result["selected"]], ["green"])
+
     def test_locked_grid_is_preserved_and_counted(self):
         payload = dict(self.payload)
         payload["locked"] = [
