@@ -19,10 +19,14 @@ def _number(value: Any) -> float:
         return 0.0
     text = str(value).strip().replace("\u00a0", "").replace(" ", "")
     text = re.sub(r"[^0-9,.-]", "", text)
-    if text.count(",") == 1 and "." not in text:
-        text = text.replace(",", ".")
-    elif "," in text and "." in text:
-        text = text.replace(",", "")
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        tail = text.rsplit(",", 1)[-1]
+        text = text.replace(",", "" if len(tail) == 3 else ".")
     try:
         return float(text)
     except (TypeError, ValueError):
@@ -67,8 +71,8 @@ def _duration_minutes(value: Any) -> float:
     clock = re.fullmatch(r"(\d{1,3}):(\d{1,2})", raw)
     if clock:
         return int(clock.group(1)) * 60 + int(clock.group(2))
-    hours = re.search(r"([\d.]+)\s*(?:h|час)", raw)
-    minutes = re.search(r"([\d.]+)\s*(?:m|min|мин)", raw)
+    hours = re.search(r"([\d.]+)\s*(?:h|ч(?:ас(?:а|ов)?)?)", raw)
+    minutes = re.search(r"([\d.]+)\s*(?:m|min|мин|м(?:ин(?:ут(?:а|ы)?)?)?)", raw)
     if hours or minutes:
         return (float(hours.group(1)) * 60 if hours else 0.0) + (float(minutes.group(1)) if minutes else 0.0)
     amount = _number(raw)
