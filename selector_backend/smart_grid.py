@@ -90,7 +90,7 @@ def _room_group(room: Any) -> str:
 
 def _format_flags(name: Any) -> tuple[bool, bool, bool]:
     text = str(name or "").lower()
-    return ("pko" in text or "progressive" in text,
+    return ("pko" in text or "progressive" in text or "bounty" in text or "knockout" in text,
             "turbo" in text or "hyper" in text,
             "freezeout" in text or "regular" in text)
 
