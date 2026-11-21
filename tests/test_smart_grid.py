@@ -105,5 +105,28 @@ class SmartGridOptimizerTests(unittest.TestCase):
         self.assertNotIn("manual", {item["id"] for item in result["selected"]})
 
 
+
+    def test_room_preference_order_is_gg_ipoker_pokerdom_coin_wpn(self):
+        payload = dict(self.payload)
+        payload["settings"] = {**self.payload["settings"], "max_tables": 1}
+        base = {
+            "name": "Regular Freezeout", "buyin": "$2", "ev_mtt": "$1",
+            "roi_str": "20%", "priority": "1", "duration": "1:00",
+            "smart_start_at": "2026-11-14T19:00", "gtd": "$100", "afs": "100",
+        }
+        cases = [
+            (["WPN", "CoinPoker", "Pokerdom", "iPoker", "GGNetwork"], "GGNetwork"),
+            (["WPN", "CoinPoker", "Pokerdom", "iPoker"], "iPoker"),
+            (["WPN", "CoinPoker", "Pokerdom"], "Pokerdom"),
+            (["WPN", "CoinPoker"], "CoinPoker"),
+        ]
+        for rooms, expected in cases:
+            with self.subTest(expected=expected):
+                payload["tournaments"] = [
+                    {**base, "id": room, "room": room} for room in rooms
+                ]
+                result = optimize_smart_grid(payload)
+                self.assertEqual(result["selected"][0]["room"], expected)
+
 if __name__ == "__main__":
     unittest.main()
