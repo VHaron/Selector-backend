@@ -127,9 +127,8 @@ def _score(t: dict, duration_minutes: float, buyin_usd: float) -> float:
     is_pko, is_turbo, _ = _format_flags(t.get("name"))
     pko_bonus = 45 if is_pko else 0
     turbo_adjustment = -10 if is_turbo else 0
-    room_bonus = ROOM_PRIORITY[_room_group(t.get("room"))]
     return (ev_ratio * 10 + roi_score * 7 + overlay * 5 + priority * 65
-            + duration_score * 4 + pko_bonus + turbo_adjustment + room_bonus)
+            + duration_score * 4 + pko_bonus + turbo_adjustment)
 
 
 def _peak_tables(intervals: list[tuple[datetime, datetime]]) -> int:
@@ -263,9 +262,6 @@ def optimize_smart_grid(payload: dict) -> dict:
     best = max(states, key=lambda state: state_value(state))
     chosen, spent, intervals, score = best
     all_intervals = list(intervals)
-    room_counts = {key: 0 for key in ROOM_PRIORITY}
-    for item in locked_items + [entry["item"] for entry in chosen]:
-        room_counts[_room_group(item.get("room"))] += 1
     peak = _peak_tables(all_intervals)
     selected = []
     for entry in sorted(chosen, key=lambda entry: entry["start"]):
@@ -283,13 +279,12 @@ def optimize_smart_grid(payload: dict) -> dict:
             "remaining_usd": round(max(0, budget - spent) / 100, 2),
             "peak_tables": peak,
             "estimated_end": end_at.isoformat(timespec="minutes") if end_at else None,
-            "room_counts": room_counts,
             "candidates_considered": len(ranked),
             "candidates_rejected": max(0, len(candidates) - len(ranked)),
             "durations_inferred": inferred_duration_count,
             "selected_pko_count": sum(1 for entry in chosen if _format_flags(entry["item"].get("name"))[0]),
             "selected_turbo_count": sum(1 for entry in chosen if _format_flags(entry["item"].get("name"))[1]),
             "objective_score": round(score, 2),
-            "optimizer": "beam-search-v2-room-priority",
+            "optimizer": "beam-search-v3-room-neutral",
         },
     }
