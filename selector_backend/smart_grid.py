@@ -11,7 +11,17 @@ from typing import Any
 import re
 
 
-ROOM_TARGETS = {"gg": 0.425, "ipoker": 0.30, "other": 0.275}
+# Room preference is deliberately hierarchical, not a quota: the optimizer
+# should build its core around GG, then iPoker, followed by Pokerdom, CoinPoker
+# and WPN. Other rooms remain eligible as fallback options.
+ROOM_PRIORITY = {
+    "gg": 45,
+    "ipoker": 30,
+    "pokerdom": 18,
+    "coin": 10,
+    "wpn": 4,
+    "other": 0,
+}
 
 
 def _number(value: Any) -> float:
@@ -74,17 +84,23 @@ def _duration_minutes(value: Any) -> float:
     hours = re.search(r"([\d.]+)\s*(?:h|ч(?:ас(?:а|ов)?)?)", raw)
     minutes = re.search(r"([\d.]+)\s*(?:m|min|мин|м(?:ин(?:ут(?:а|ы)?)?)?)", raw)
     if hours or minutes:
-        return (float(hours.group(1)) * 60 if hours else 0.0) + (float(minutes.group(1)) if minutes else 0.0)
+        return (float(hours.group(1)) * 60 if hours else 0.0) + (float(minutes.group(1)) if minutes else 0.0
     amount = _number(raw)
     return amount * 60 if amount > 0 else 0.0
 
 
 def _room_group(room: Any) -> str:
     name = re.sub(r"[^a-z0-9]", "", str(room or "").lower())
-    if "gg" in name:
+    if any(token in name for token in ("ggnetwork", "ggpoker", "ggnet")) or name == "gg":
         return "gg"
     if "ipoker" in name or "redstar" in name:
         return "ipoker"
+    if "pokerdom" in name or name == "pd":
+        return "pokerdom"
+    if "coinpoker" in name or name == "coin":
+        return "coin"
+    if "wpn" in name or "americascardroom" in name or name == "acr":
+        return "wpn"
     return "other"
 
 
@@ -105,17 +121,15 @@ def _score(t: dict, duration_minutes: float, buyin_usd: float) -> float:
     overlay = min(1.0, gtd / max(1.0, buyin * field)) if gtd > 0 else 0.0
     # Priority colors: 1 = green (preferred), 2 = yellow, 3 = red (fallback only).
     priority = {"1": 1.0, "2": 0.35, "3": 0.0}.get(str(t.get("priority", "3")), 0.0)
-    # EV is an available estimate, not a guaranteed or independently verified result.
     ev_ratio = max(-1.0, min(2.0, ev / buyin))
     roi_score = max(-1.0, min(2.0, roi))
     duration_score = max(0.0, 1.0 - duration_minutes / 600.0)
-    # PKO tournaments are preferred because their progressive bounty structure
-    # is a primary selection preference. Turbo formats are supplementary options.
     is_pko, is_turbo, _ = _format_flags(t.get("name"))
     pko_bonus = 45 if is_pko else 0
     turbo_adjustment = -10 if is_turbo else 0
-    # Green priority remains the strongest single signal; PKO receives a substantial bonus.
-    return ev_ratio * 10 + roi_score * 7 + overlay * 5 + priority * 65 + duration_score * 4 + pko_bonus + turbo_adjustment
+    room_bonus = ROOM_PRIORITY[_room_group(t.get("room"))]
+    return (ev_ratio * 10 + roi_score * 7 + overlay * 5 + priority * 65
+            + duration_score * 4 + pko_bonus + turbo_adjustment + room_bonus)
 
 
 def _peak_tables(intervals: list[tuple[datetime, datetime]]) -> int:
@@ -189,8 +203,6 @@ def optimize_smart_grid(payload: dict) -> dict:
     if spent_locked > budget:
         raise ValueError("Уже добавленные вручную турниры превышают указанный бюджет")
 
-    # Turbo and super-turbo events are a late-session add-on, not core early-session volume.
-    # Reserve the final 30% of the configured session for these faster formats.
     late_phase_start = session_start + (session_end - session_start) * 0.70
 
     ranked = []
@@ -209,9 +221,7 @@ def optimize_smart_grid(payload: dict) -> dict:
         end = start + timedelta(minutes=duration)
         if start < session_start or end > session_end:
             continue
-        is_pko, is_turbo, _ = _format_flags(item.get("name"))
-        # Keep turbo / super-turbo out of the early schedule; they are only added
-        # during the final session phase as supplementary tables.
+        _, is_turbo, _ = _format_flags(item.get("name"))
         if is_turbo and start < late_phase_start:
             continue
         if price / 100 > 5.500001 or price + spent_locked > budget:
@@ -227,8 +237,6 @@ def optimize_smart_grid(payload: dict) -> dict:
     if locked_peak > max_tables:
         raise ValueError("Текущая сетка уже превышает ограничение по одновременным столам")
 
-    # Beam-search over include/skip decisions. This evaluates combinations rather
-    # than greedily taking the next highest-rated tournament.
     width = 220
     states = [((), spent_locked, tuple(locked_intervals), 0.0)]
     for candidate in ranked:
@@ -243,27 +251,19 @@ def optimize_smart_grid(payload: dict) -> dict:
                 chosen + (candidate,), spent + candidate["price"],
                 tuple(proposed), score + candidate["score"]
             ))
+
         def state_value(state):
             chosen, spent, _, score = state
-            count = len(chosen) + len(locked_items)
-            counts = {"gg": 0, "ipoker": 0, "other": 0}
-            for entry in chosen:
-                counts[entry["group"]] += 1
-            for item in locked_items:
-                counts[_room_group(item.get("room"))] += 1
-            if count:
-                deviation = sum(abs(counts[key] / count - target) for key, target in ROOM_TARGETS.items())
-            else:
-                deviation = 0
             usage = spent / max(1, budget)
-            return score + usage * 4 - deviation * 9
+            return score + usage * 4
+
         next_states.sort(key=state_value, reverse=True)
         states = next_states[:width]
 
     best = max(states, key=lambda state: state_value(state))
     chosen, spent, intervals, score = best
     all_intervals = list(intervals)
-    room_counts = {"gg": 0, "ipoker": 0, "other": 0}
+    room_counts = {key: 0 for key in ROOM_PRIORITY}
     for item in locked_items + [entry["item"] for entry in chosen]:
         room_counts[_room_group(item.get("room"))] += 1
     peak = _peak_tables(all_intervals)
@@ -290,6 +290,6 @@ def optimize_smart_grid(payload: dict) -> dict:
             "selected_pko_count": sum(1 for entry in chosen if _format_flags(entry["item"].get("name"))[0]),
             "selected_turbo_count": sum(1 for entry in chosen if _format_flags(entry["item"].get("name"))[1]),
             "objective_score": round(score, 2),
-            "optimizer": "beam-search-v1",
+            "optimizer": "beam-search-v2-room-priority",
         },
     }
