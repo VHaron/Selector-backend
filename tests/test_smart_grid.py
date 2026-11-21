@@ -1,5 +1,5 @@
 import unittest
-from selector_backend.smart_grid import optimize_smart_grid
+from selector_backend.smart_grid import optimize_smart_grid, _score
 
 
 class SmartGridOptimizerTests(unittest.TestCase):
@@ -106,27 +106,18 @@ class SmartGridOptimizerTests(unittest.TestCase):
 
 
 
-    def test_room_preference_order_is_gg_ipoker_pokerdom_coin_wpn(self):
-        payload = dict(self.payload)
-        payload["settings"] = {**self.payload["settings"], "max_tables": 1}
+    def test_room_identity_does_not_change_tournament_score(self):
         base = {
             "name": "Regular Freezeout", "buyin": "$2", "ev_mtt": "$1",
             "roi_str": "20%", "priority": "1", "duration": "1:00",
-            "smart_start_at": "2026-11-14T19:00", "gtd": "$100", "afs": "100",
+            "gtd": "$100", "afs": "100",
         }
-        cases = [
-            (["WPN", "CoinPoker", "Pokerdom", "iPoker", "GGNetwork"], "GGNetwork"),
-            (["WPN", "CoinPoker", "Pokerdom", "iPoker"], "iPoker"),
-            (["WPN", "CoinPoker", "Pokerdom"], "Pokerdom"),
-            (["WPN", "CoinPoker"], "CoinPoker"),
+        scores = [
+            _score({**base, "room": room}, 60, 2)
+            for room in ("GGNetwork", "iPoker", "Pokerdom", "CoinPoker", "WPN", "AnyOtherRoom")
         ]
-        for rooms, expected in cases:
-            with self.subTest(expected=expected):
-                payload["tournaments"] = [
-                    {**base, "id": room, "room": room} for room in rooms
-                ]
-                result = optimize_smart_grid(payload)
-                self.assertEqual(result["selected"][0]["room"], expected)
+        self.assertEqual(len(set(scores)), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
