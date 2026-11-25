@@ -7,7 +7,7 @@ import websocket
 import requests
 from .ipoker_socketio import build_tournament_subscription, decode_application_message, encode_application_message, encode_legacy_application_message, extract_tournaments
 
-WS_URL = "wss://oapi-cur.techonlinecorp.com/socket.io/"
+WS_URL = "wss://schannel.ipoker.com/socket.io/"
 ORIGIN = "https://games.championpoker.com"
 logger = logging.getLogger("ipoker.worker")
 REQUIRED_AUTH_FIELDS = {"ID","responses","sessionToken","userName","casinoName","clientType","deliveryPlatform","correlationId"}
