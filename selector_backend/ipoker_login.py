@@ -70,7 +70,7 @@ def _find_temp_token(value: Any) -> str | None:
 
 
 def _client_hints() -> str:
-    """Build a compact Chromium client-hints JSON value for the form field."""
+    """Return the Chromium clientHints JSON observed in the browser request."""
     configured = os.getenv("IPOKER_CLIENT_HINTS_JSON", "").strip()
     if configured:
         try:
@@ -79,29 +79,16 @@ def _client_hints() -> str:
                 return json.dumps(parsed, separators=(",", ":"))
         except ValueError:
             pass
-    version = os.getenv("IPOKER_CHROME_MAJOR", "157")
-    platform = os.getenv("IPOKER_CHROME_PLATFORM", "Windows")
-    full_version = f"{version}.0.0.0"
-    hints = {
-        "Sec-CH-UA-Model": "",
-        "Sec-CH-UA-Pixel-Ratio": "1",
-        "Sec-CH-UA-Platform": platform,
-        "Sec-CH-UA-Platform-Version": "10.0.0",
-        "Sec-CH-UA-Full-Version-List": [
-            {"brand": "Not_A Brand", "version": "99.0.0.0"},
-            {"brand": "Google Chrome", "version": full_version},
-            {"brand": "Chromium", "version": full_version},
-        ],
-        "Sec-CH-UA": (
-            f'"Not_A Brand";v="99", "Google Chrome";v="{version}", '
-            f'"Chromium";v="{version}"'
+    return json.dumps({
+        "Sec-CH-UA-Model": '"Pixel 10"',
+        "Sec-CH-UA-Platform": '"Android"',
+        "Sec-CH-UA-Platform-Version": '"16"',
+        "Sec-CH-UA-Full-Version-List": (
+            '"Not-A.Brand";v="99.0.0.0", '
+            '"Google Chrome";v="157.0.8103.79", '
+            '"Chromium";v="157.0.8103.79"'
         ),
-        "Sec-CH-UA-Mobile": "?0",
-        "Sec-CH-UA-Arch": "x86",
-        "Sec-CH-UA-Bitness": "64",
-    }
-    return json.dumps(hints, separators=(",", ":"))
-
+    }, separators=(",", ":"))
 
 def _parse_response(response: requests.Response) -> Any:
     try:
@@ -170,30 +157,25 @@ def login_and_get_temp_token() -> dict[str, Any]:
             "casinoname": CASINO,
             "realMode": real_mode,
             "serviceType": "GamePlay",
-            "systemId": os.getenv("IPOKER_SYSTEM_ID", "5"),
             "clientType": "casino",
-            "clientPlatform": "mobile",
+            "clientPlatform": "web",
             "clientSkin": CASINO,
-            "deliveryPlatform": os.getenv("IPOKER_DELIVERY_PLATFORM", "html5"),
-            "redirectUrl": f"{SITE_ORIGIN}/#requestId={request_id}",
+            "deviceId": os.getenv("IPOKER_DEVICE_ID") or str(uuid.uuid4()),
+            "deliveryPlatform": "Hub2",
+            "languageCode": "en",
+            "redirectUrl": f"https://www.championpoker.com/#requestId={request_id}",
             "errorLevel": "1",
+            "messagesSupported": "1",
         }
         fields = {
-            "eventOrigin": SITE_ORIGIN,
-            "hr": f"{SITE_ORIGIN}/",
+            "eventOrigin": LOGIN_BASE,
+            "hr": "https://www.championpoker.com/poker",
             "requestType": "LoginAndGetTempToken",
             "username": username,
             "password": password,
             "loginType": "password",
         }
-        configured_hints = os.getenv("IPOKER_CLIENT_HINTS_JSON", "").strip()
-        if configured_hints:
-            try:
-                hints = json.loads(configured_hints)
-                if isinstance(hints, dict):
-                    fields["clientHints"] = json.dumps(hints, separators=(",", ":"))
-            except ValueError:
-                pass
+        fields["clientHints"] = _client_hints()
 
         multipart = [(key, (None, _encode_form_value(value))) for key, value in fields.items()]
         multipart.append(("responseType", (None, "json")))
