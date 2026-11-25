@@ -42,3 +42,17 @@ The default integration configuration says system ID 5, while the authenticated-
 - First-party integration function for username/password login and temporary-token request construction: confirmed from downloaded client JS.
 - Exact login endpoint response and MFA/challenge requirements: not yet verified.
 - Fully unattended Railway login: not yet proven.
+
+
+## Additional client transport details (verified in integration.js)
+
+- `iapiAddClientHintsAndContinue` checks whether DeviceAtlas is enabled. If not enabled, it sends the request immediately. If enabled, it waits briefly for browser client hints and DeviceAtlas properties; on timeout it still proceeds without them. This means these fields are conditional, not universally mandatory.
+- `iapiMakeRedirectRequest` selects a configured login server from `iapiConf.loginServer`, appends casino context parameters, and adds a `redirectUrl` carrying a request ID. It creates a hidden iframe and transfers a message containing `requestType`, `postParams`, URL, casino, request ID, and login-server origin to `pasSetupPage.php`.
+- The iframe transport uses `postMessage` when supported; otherwise the integration falls back to a form POST into the iframe. This is not a simple JSON REST call.
+- The login request's POST fields are assembled according to the configured authentication type, with `loginType` always added. Username/password is only the default branch; nickname, email, OTP, external-token, and session-token modes have different field names.
+- The wrapper adds context query parameters when configured, including client type/platform/version/skin, channel, device metadata, and language. The actual values are installation/runtime configuration, not all hardcoded constants.
+- The HAR contains no `LoginAndGetTempToken.php` request or response. It therefore cannot establish the endpoint's successful response payload or error semantics. The observed `GetTemporaryAuthenticationToken.php` request remains a separate already-authenticated-session operation.
+
+## Updated assessment
+
+A backend implementation would need to reproduce a browser-oriented iframe/postMessage transport contract, or establish from a controlled, authorized test that the login server accepts the equivalent direct form POST. The client code alone does not prove that a raw backend POST is supported. Do not infer that the presence of a public JavaScript function guarantees a headless login will succeed.
