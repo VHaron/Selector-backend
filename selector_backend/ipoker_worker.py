@@ -77,33 +77,70 @@ class IPokerWorker:
                 return msg
         raise TimeoutError("Expected upstream response timed out")
     def _open_engineio3(self):
+        # The browser first obtains an Engine.IO session over HTTP polling,
+        # then upgrades that same SID to WebSocket. A direct WS open is rejected
+        # by this upstream with HTTP 400.
         user_agent = str(self.auth.get("userAgent", "Mozilla/5.0"))
-        headers = ["Origin: " + ORIGIN, "Referer: " + ORIGIN + "/",
-                   "User-Agent: " + user_agent]
+        session = requests.Session()
+        session.headers.update({
+            "Origin": ORIGIN,
+            "Referer": ORIGIN + "/",
+            "User-Agent": user_agent,
+            "Accept": "*/*",
+        })
         if self.cookie_header:
-            headers.append("Cookie: " + self.cookie_header)
-        url = WS_URL + "?EIO=3&transport=websocket&t=" + str(int(time.time() * 1000))
-        ws = websocket.create_connection(url, timeout=8, header=headers,
-                                         enable_multithread=True)
-        opening = ws.recv()
-        if isinstance(opening, bytes):
-            opening = opening.decode("utf-8", "replace")
+            session.headers["Cookie"] = self.cookie_header
+        poll_url = WS_URL.replace("wss://", "https://").replace("ws://", "http://")
+        poll_url += "?EIO=3&transport=polling&t=" + str(int(time.time() * 1000))
+        response = session.get(poll_url, timeout=12)
+        response.raise_for_status()
+        opening = response.text
         if not isinstance(opening, str) or not opening.startswith("0"):
-            ws.close()
-            raise ConnectionError("Engine.IO v3 opening packet was not received")
+            raise ConnectionError("Engine.IO v3 polling opening packet was not received")
         try:
             handshake = json.loads(opening[1:])
         except (ValueError, TypeError):
-            ws.close()
-            raise ConnectionError("Engine.IO v3 handshake was malformed")
-        if not isinstance(handshake, dict) or not handshake.get("sid"):
-            ws.close()
-            raise ConnectionError("Engine.IO v3 handshake omitted sid")
-        ws.send("40")
-        namespace = self.recv(ws, 10)
-        if namespace != "40":
-            raise ConnectionError("Socket.IO namespace connection was not accepted")
-        return ws
+            raise ConnectionError("Engine.IO v3 polling handshake was malformed")
+        sid = handshake.get("sid") if isinstance(handshake, dict) else None
+        if not sid:
+            raise ConnectionError("Engine.IO v3 polling handshake omitted sid")
+        if "websocket" not in (handshake.get("upgrades") or []):
+            raise ConnectionError("Engine.IO v3 session does not offer websocket upgrade")
+
+        headers = [
+            "Origin: " + ORIGIN,
+            "Referer: " + ORIGIN + "/",
+            "User-Agent: " + user_agent,
+        ]
+        cookie = session.cookies.get_dict()
+        if cookie:
+            headers.append("Cookie: " + "; ".join(k + "=" + v for k, v in cookie.items()))
+        elif self.cookie_header:
+            headers.append("Cookie: " + self.cookie_header)
+        ws_url = WS_URL + "?EIO=3&transport=websocket&sid=" + str(sid)
+        ws_url += "&t=" + str(int(time.time() * 1000))
+        ws = websocket.create_connection(
+            ws_url, timeout=10, header=headers, enable_multithread=True
+        )
+        try:
+            ws.send("2probe")
+            probe = ws.recv()
+            if isinstance(probe, bytes):
+                probe = probe.decode("utf-8", "replace")
+            if probe != "3probe":
+                raise ConnectionError("Engine.IO v3 websocket probe was not accepted")
+            ws.send("5")
+            ws.send("40")
+            namespace = self.recv(ws, 10)
+            if namespace != "40":
+                raise ConnectionError("Socket.IO namespace connection was not accepted")
+            return ws
+        except Exception:
+            try:
+                ws.close()
+            except Exception:
+                pass
+            raise
 
     def _send_initial_client_messages(self, ws):
         # These two requests are sent by the browser before Hub2 login.
@@ -122,11 +159,11 @@ class IPokerWorker:
         }))
 
     def connect_once(self):
-        logger.info("iPoker Engine.IO v3 websocket connecting")
+        logger.info("iPoker Engine.IO v3 polling handshake and websocket upgrade starting")
         ws = self._open_engineio3()
         try:
             self.set(connected=True,last_error=None)
-            logger.info("iPoker Engine.IO v3 connected; sending browser initialization and Hub2 auth")
+            logger.info("iPoker Engine.IO v3 websocket upgraded; sending browser initialization and Hub2 auth")
             self._send_initial_client_messages(ws)
             ws.send(encode_application_message(self.auth))
             auth=self.wait_for(ws,{31002,31009},30,True)
