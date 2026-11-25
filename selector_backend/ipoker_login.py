@@ -228,24 +228,73 @@ def login_and_get_temp_token() -> dict[str, Any]:
 
 
 def build_auth_message(login: dict[str, Any]) -> dict[str, Any]:
-    """Build the observed ChampionPoker Hub2 login request (ID 33036)."""
-    return {
-        "ID": 33036,
-        "responses": [31002, 31009],
-        "description": "Login with existing Session token",
-        "logoutOnDisconnectBehaviour": "hierarchical",
-        "logoutOnDisconnect": True,
-        "waitingMessages": False,
-        "realMode": 1 if login.get("real_mode", True) else 0,
+    """Build the native iPoker PokerLoginRequest (classId 60108).
+
+    The temp token from LoginAndGetTempToken is passed as tempToken. The previous
+    33036/31002 envelope belongs to a different protocol and is not used by the
+    PokerRender Socket.IO client captured on schannel.ipoker.com.
+    """
+    user_agent = os.getenv(
+        "IPOKER_USER_AGENT",
+        "Mozilla/5.0 (Linux; Android 16; Pixel 10) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/157.0.0.0 Mobile Safari/537.36",
+    )
+    is_mobile = "Mobile" in user_agent or "Android" in user_agent or "iPhone" in user_agent
+    if "Android" in user_agent:
+        device_family = "android"
+        device_type = "smartphone"
+        match = re.search(r"Android ([0-9.]+)", user_agent)
+        os_version = f"Android {match.group(1)}" if match else None
+    elif "Windows" in user_agent:
+        device_family = "windows"
+        device_type = "pc"
+        match = re.search(r"Windows NT ([0-9.]+)", user_agent)
+        os_version = f"Windows NT {match.group(1)}" if match else None
+    elif "Mac OS X" in user_agent:
+        device_family = "mac"
+        device_type = "pc"
+        match = re.search(r"Mac OS X ([0-9_]+)", user_agent)
+        os_version = f"OS X {match.group(1).replace('_', '.')}" if match else None
+    elif "iPhone" in user_agent or "iPad" in user_agent:
+        device_family = "ios"
+        device_type = "smartphone" if "iPhone" in user_agent else "tablet"
+        match = re.search(r"OS ([0-9_]+)", user_agent)
+        os_version = f"OS {match.group(1).replace('_', '.')}" if match else None
+    else:
+        device_family = None
+        device_type = "smartphone" if is_mobile else "pc"
+        os_version = None
+
+    client_type = int(os.getenv("IPOKER_CLIENT_TYPE", "26" if is_mobile else "25"))
+    platform_type = int(os.getenv("IPOKER_PLATFORM_TYPE", "5"))  # HTML5
+    supported_services = [
+        {"service": "VIP_LEVELS", "version": 3},
+        {"service": "POINT_BALANCE_UPDATES", "version": 2},
+        {"service": "QUICK_CHAT", "version": -1},
+        {"service": "SIX_PLUS", "version": 1},
+        {"service": "MISSIONS", "version": 1},
+        {"service": "BONUS_ACTIVATION", "version": 1},
+    ]
+    request = {
         "casinoName": CASINO,
-        "clientVersion": os.getenv("IPOKER_CLIENT_VERSION", ""),
-        "clientPlatform": os.getenv("IPOKER_CLIENT_PLATFORM", "mobile"),
-        "clientType": "casino",
+        "usernameOrNickname": str(login["username"]),
+        "usernameLogin": True,
         "languageCode": os.getenv("IPOKER_WS_LANGUAGE_CODE", "en"),
-        "deliveryPlatform": "Hub2",
-        "userName": str(login["username"]),
-        "sessionToken": str(login["temp_token"]),
-        "errorLevel": 1,
-        "relativeURI": "/poker",
-        "correlationId": "correlationId_" + str(uuid.uuid4()),
+        "tempToken": str(login["temp_token"]),
+        "clientPlatform": client_type,
+        "clientVersion": os.getenv("IPOKER_CLIENT_VERSION", "26.7.1.26"),
+        "realMode": bool(login.get("real_mode", True)),
+        "supportedPokerServices": supported_services,
+        "deviceName": None,
+        "deviceFamily": device_family,
+        "deviceType": device_type,
+        "osVersion": os_version,
+        "platformType": platform_type,
+        "browser": None,
+        "userAgent": user_agent,
+        "loginType": int(os.getenv("IPOKER_LOGIN_TYPE", "0")),
+        "softSerial": os.getenv("IPOKER_SOFT_SERIAL") or None,
+        "hardSerial": None,
+        "classId": 60108,
     }
+    return request
