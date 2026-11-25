@@ -181,11 +181,16 @@ class IPokerWorker:
         )
         sio.on("message", self._on_message)
         sio.on("disconnect", self._on_disconnect)
-        # python-socketio 4.6.1 returns from connect() when Engine.IO opens;
-        # unlike browser socket.io-client, it does not wait for the server's
-        # implicit root-namespace CONNECT packet. PokerRender sends 60200 only
-        # after that namespace "connect" event. Wait for it explicitly.
-        sio.on("connect", lambda: namespace_ready.set())
+
+        # Match PokerRender: send 60200 synchronously inside the namespace
+        # CONNECT callback. A worker-thread wait races the reader thread; the
+        # server disconnects if the first application message is delayed.
+        def on_namespace_connect():
+            logger.info("Socket.IO root namespace CONNECT; sending 60200 immediately")
+            sio.send({"flag": 0, "casinoName": CASINO, "classId": 60200})
+            namespace_ready.set()
+
+        sio.on("connect", on_namespace_connect)
         self.sio = sio
         sio.connect(
             SOCKET_URL,
@@ -207,6 +212,7 @@ class IPokerWorker:
         self.set(connected=True, last_error=None)
         logger.info("ChampionPoker Socket.IO root namespace CONNECT acknowledged")
         return sio
+
 
     def _send(self, message):
         client = self.sio
@@ -301,12 +307,7 @@ class IPokerWorker:
     def connect_once(self):
         sio = self._open_socketio()
         try:
-            logger.info("Socket.IO connected; sending ClientServerHandshakeRequest (60200)")
-            self._send({
-                "flag": 0,
-                "casinoName": CASINO,
-                "classId": 60200,
-            })
+            logger.info("Waiting for ClientServerHandshakeResponse (60201)")
             self._wait_for({60201}, timeout=20, check_error=True)
             logger.info("Server handshake accepted (60201); registering client (50001)")
 
