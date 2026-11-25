@@ -112,12 +112,24 @@ class IPokerWorker:
             if len(parts) < 4 or not parts[0] or "websocket" not in parts[3].split(","):
                 raise ConnectionError("Legacy Socket.IO handshake response was invalid")
             sid = parts[0]
-            legacy_ws_url = WS_URL + "1/websocket/" + sid
+            # Match the captured browser URL, including its cache-busting timestamp.
+            legacy_ws_url = WS_URL + "1/websocket/" + sid + "?t=" + str(int(time.time() * 1000))
+            ws_headers = [
+                "Origin: " + ORIGIN,
+                "Referer: " + ORIGIN + "/poker",
+                "User-Agent: " + user_agent,
+            ]
+            # Preserve cookies issued by the HTTP handshake as well as the
+            # authenticated browser cookies supplied by the user handoff.
+            handshake_cookies = session.cookies.get_dict()
+            cookie_parts = [k + "=" + v for k, v in handshake_cookies.items()]
+            if self.cookie_header:
+                cookie_parts.append(self.cookie_header)
+            if cookie_parts:
+                ws_headers.append("Cookie: " + "; ".join(cookie_parts))
             ws = websocket.create_connection(
-                legacy_ws_url, timeout=10,
-                header=["Origin: " + ORIGIN, "Referer: " + ORIGIN + "/poker",
-                        "User-Agent: " + user_agent],
-                cookie=self.cookie_header, enable_multithread=True,
+                legacy_ws_url, timeout=10, header=ws_headers,
+                enable_multithread=True,
             )
             self.legacy_socketio = True
             first_packet = self.recv(ws, 10)
