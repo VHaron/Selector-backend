@@ -18,7 +18,6 @@ def validate_auth_message(payload: dict[str, Any]) -> None:
     if payload["ID"] != 33036: raise ValueError("auth_message.ID must be 33036")
     for key in ("sessionToken","userName","casinoName","clientType","deliveryPlatform","correlationId"):
         if not isinstance(payload.get(key),(str,int)) or not str(payload[key]).strip(): raise ValueError(f"auth_message.{key} must be non-empty")
-    if not isinstance(payload["supportedPokerServices"],(list,dict,str)): raise ValueError("Invalid supportedPokerServices")
 
 def build_lobby_init(session_id: str) -> dict[str, Any]:
     return {"classId":50001,"casinoName":"championpoker","casinoShortName":None,"casinoSkin":"championpoker","clientPlatform":26,"clientType":26,"clientVersion":"26.7.1.26","oldClientVersion":None,"isFun":False,"languageCode":"EN","previewClient":False,"sessionId":session_id,"subscibeLobbyContentRequest":False,"subscribeClientServices":True}
