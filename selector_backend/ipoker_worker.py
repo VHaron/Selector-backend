@@ -1,6 +1,6 @@
 """Assisted in-memory ChampionPoker Socket.IO collector. Never persists auth material."""
 from __future__ import annotations
-import json, threading, time
+import json, logging, threading, time
 from datetime import datetime, timezone
 from typing import Any
 import websocket
@@ -8,6 +8,7 @@ from .ipoker_socketio import build_tournament_subscription, decode_application_m
 
 WS_URL = "wss://schannel.ipoker.com/socket.io/?EIO=3&transport=websocket"
 ORIGIN = "https://games.championpoker.com"
+logger = logging.getLogger("ipoker.worker")
 REQUIRED_AUTH_FIELDS = {"classId","tempToken","usernameOrNickname","usernameLogin","loginType","realMode","casinoName","clientPlatform","clientVersion","deviceFamily","deviceName","deviceType","hardSerial","softSerial","languageCode","osVersion","platformType","supportedPokerServices","browser","userAgent"}
 
 def validate_auth_message(payload: dict[str, Any]) -> None:
@@ -67,6 +68,7 @@ class IPokerWorker:
                 return msg
         raise TimeoutError("Expected upstream response timed out")
     def connect_once(self):
+        logger.info("iPoker WebSocket connecting")
         ws=websocket.create_connection(WS_URL,timeout=2,origin=ORIGIN,enable_multithread=True)
         try:
             hello=self.recv(ws,20)
@@ -80,11 +82,13 @@ class IPokerWorker:
                 if frame.startswith("44"): raise ConnectionError("Socket.IO namespace rejected")
             else: raise TimeoutError("Namespace handshake timeout")
             self.set(connected=True,last_error=None)
+            logger.info("iPoker WebSocket namespace connected; sending auth")
             ws.send(encode_application_message(self.auth))
             auth=self.wait_for(ws,{60109},25,True)
             sid=auth.get("sessionId")
             if not isinstance(sid,str) or not sid: raise ConnectionError("Auth response omitted sessionId")
             self.set(authenticated=True)
+            logger.info("iPoker WebSocket authenticated")
             ws.send(encode_application_message(build_lobby_init(sid)))
             # The observed skin sends 50003. 50026 may precede it.
             try: self.wait_for(ws,{50003},20)
@@ -92,12 +96,14 @@ class IPokerWorker:
             ws.send(encode_application_message(build_tournament_subscription()))
             self.wait_for(ws,{50018},25,True)
             self.set(subscribed=True)
+            logger.info("iPoker tournament subscription confirmed")
             while not self.stop_event.is_set():
                 frame=self.recv(ws,60)
                 records,_=extract_tournaments([frame])
                 if records:
                     saved=self.save_callback(records,None,"0.4.0-ws-worker")
                     self.set(last_catalog_at=datetime.now(timezone.utc).isoformat(),catalog_count=saved.get("count",len(records)),last_error=None)
+                    logger.info("iPoker catalog updated: received=%s total=%s", len(records), saved.get("count",len(records)))
         finally:
             try: ws.close()
             except Exception: pass
@@ -106,9 +112,11 @@ class IPokerWorker:
             while not self.stop_event.is_set():
                 try: self.connect_once()
                 except AuthenticationRejected as exc:
+                    logger.error("iPoker upstream authentication rejected")
                     self.set(connected=False,authenticated=False,subscribed=False,running=False,last_error=type(exc).__name__)
                     break
                 except Exception as exc:
+                    logger.warning("iPoker collector connection failed: %s", type(exc).__name__)
                     self.set(connected=False,authenticated=False,subscribed=False,last_error=type(exc).__name__)
                     if self.stop_event.wait(10): break
                     self.set(reconnects=self.status()["reconnects"]+1)
