@@ -1,25 +1,20 @@
-"""Assisted in-memory ChampionPoker Socket.IO collector. Auth material is never persisted."""
+"""Assisted in-memory ChampionPoker Socket.IO collector. Auth is never persisted."""
 from __future__ import annotations
 
 import json
 import logging
+import queue
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-import requests
-import websocket
+import socketio
 
-from .ipoker_socketio import (
-    build_tournament_subscription,
-    decode_application_message,
-    encode_application_message,
-    extract_tournaments,
-)
+from .ipoker_socketio import build_tournament_subscription, extract_tournaments
 
-WS_URL = "wss://schannel.ipoker.com/socket.io/"
+SOCKET_URL = "https://schannel.ipoker.com"
 ORIGIN = "https://games.championpoker.com"
 REFERER = (
     "https://games.championpoker.com/poker/web/26.7.1.26/html/poker/"
@@ -62,20 +57,21 @@ def validate_auth_message(payload: dict[str, Any]) -> None:
         raise ValueError("auth_message.supportedPokerServices must be a list")
 
 
-def build_register_client_request() -> dict[str, Any]:
+def build_register_client_request(auth: dict[str, Any]) -> dict[str, Any]:
     """Mirror SessionEngine.doRegisterClientRequest() from PokerRender.bundle.js."""
+    client_type = int(auth.get("clientPlatform", 26))
     return {
         "casinoShortName": None,
         "languageCode": "EN",
-        "clientType": 26,
+        "clientType": client_type,
         "previewClient": False,
         "oldClientVersion": None,
         "nickName": None,
         "sessionId": None,
         "isBeginner": False,
         "isFun": False,
-        "clientPlatform": 26,
-        "clientVersion": CLIENT_VERSION,
+        "clientPlatform": client_type,
+        "clientVersion": str(auth.get("clientVersion") or CLIENT_VERSION),
         "subscibeLobbyContentRequest": False,
         "subscribeClientServices": True,
         "classId": 50001,
@@ -85,10 +81,12 @@ def build_register_client_request() -> dict[str, Any]:
 
 
 class AuthenticationRejected(Exception):
-    """Permanent upstream auth rejection; a fresh token is required."""
+    """Permanent upstream auth rejection; a fresh temporary token is required."""
 
 
 class IPokerWorker:
+    """Socket.IO 2 / Engine.IO 3 client, matching the bundled browser transport."""
+
     def __init__(self, save_callback, remove_callback=None):
         self.save_callback = save_callback
         self.remove_callback = remove_callback
@@ -96,6 +94,9 @@ class IPokerWorker:
         self.stop_event = threading.Event()
         self.thread = None
         self.auth = None
+        self.sio = None
+        self.incoming = queue.Queue()
+        self.disconnect_event = threading.Event()
         self.state = {
             "running": False,
             "connected": False,
@@ -107,9 +108,6 @@ class IPokerWorker:
             "last_error": None,
             "reconnects": 0,
         }
-        self._heartbeat_count = 0
-        self._transport_frame_count = 0
-        self._last_subscription_ack = None
 
     def status(self):
         with self.lock:
@@ -120,14 +118,16 @@ class IPokerWorker:
             self.state.update(kw)
 
     def start(self, auth, cookie_header=None):
-        # Cookies from login.championpoker.com are deliberately not forwarded
-        # to schannel.ipoker.com. PokerLoginRequest authenticates with tempToken.
+        # The browser uses a Socket.IO message event with JSON object payloads.
+        # Login-site cookies are not forwarded to schannel.ipoker.com.
         validate_auth_message(auth)
         with self.lock:
             if self.thread and self.thread.is_alive():
                 raise RuntimeError("Collector is already running")
             self.auth = dict(auth)
             self.stop_event.clear()
+            self.disconnect_event.clear()
+            self.incoming = queue.Queue()
             self.set(
                 running=True,
                 connected=False,
@@ -145,195 +145,96 @@ class IPokerWorker:
 
     def stop(self):
         self.stop_event.set()
+        client = self.sio
+        if client is not None:
+            try:
+                client.disconnect()
+            except Exception:
+                pass
         self.set(running=False)
         return {"status": "stopping"}
 
+    def _on_message(self, payload):
+        # Native server responses arrive as JSON strings; tolerate object payloads too.
+        self.incoming.put(payload)
+
+    def _on_disconnect(self):
+        self.disconnect_event.set()
+        self.set(connected=False, subscribed=False)
+
     def _headers(self):
-        return [
-            "Origin: " + ORIGIN,
-            "Referer: " + REFERER,
-            "User-Agent: " + str(self.auth.get("userAgent", "Mozilla/5.0")),
-        ]
-
-    def recv(self, ws, timeout=25):
-        deadline = time.monotonic() + timeout
-        while not self.stop_event.is_set():
-            if time.monotonic() >= deadline:
-                raise TimeoutError("Upstream timeout")
-            try:
-                frame = ws.recv()
-            except websocket.WebSocketTimeoutException:
-                continue
-            if frame is None:
-                raise ConnectionError("Socket closed")
-            if isinstance(frame, bytes):
-                frame = frame.decode("utf-8", "replace")
-            if frame == "2":
-                ws.send("3")
-                continue
-            if isinstance(frame, str) and frame.startswith("2"):
-                ws.send("3" + frame[1:])
-                continue
-            if frame == "41" or (isinstance(frame, str) and frame.startswith("41::")):
-                logger.warning("ChampionPoker closed the Socket.IO namespace")
-                raise ConnectionError("Socket.IO namespace disconnected")
-            self._transport_frame_count += 1
-            packet_prefix = frame[:2] if isinstance(frame, str) else "binary"
-            logger.info(
-                "iPoker upstream frame received; packet=%s length=%s count=%s",
-                packet_prefix,
-                len(frame) if hasattr(frame, "__len__") else 0,
-                self._transport_frame_count,
-            )
-            self.set(last_message_at=datetime.now(timezone.utc).isoformat())
-            return frame
-        raise RuntimeError("Stopped")
-
-    def _open_engineio3_direct(self):
-        """Use the transport order in PokerRender: websocket first, polling second."""
-        ws_url = WS_URL + "?EIO=3&transport=websocket&t=" + str(int(time.time() * 1000))
-        ws = websocket.create_connection(
-            ws_url,
-            timeout=12,
-            header=self._headers(),
-            enable_multithread=True,
-        )
-        try:
-            opening = ws.recv()
-            if isinstance(opening, bytes):
-                opening = opening.decode("utf-8", "replace")
-            if not isinstance(opening, str) or not opening.startswith("0"):
-                raise ConnectionError("Direct Engine.IO websocket did not return an opening packet")
-            try:
-                handshake = json.loads(opening[1:])
-            except (ValueError, TypeError):
-                raise ConnectionError("Direct Engine.IO opening packet was malformed") from None
-            if not isinstance(handshake, dict) or not handshake.get("sid"):
-                raise ConnectionError("Direct Engine.IO opening packet omitted session id")
-            self._engineio_sid = str(handshake["sid"])
-            self._engineio_ping_interval = int(handshake.get("pingInterval", 25000))
-            ws.send("40")
-            namespace = self.recv(ws, 12)
-            if namespace != "40":
-                raise ConnectionError("Socket.IO namespace connection was not accepted")
-            logger.info("ChampionPoker direct Engine.IO v3 websocket and namespace connected")
-            return ws
-        except Exception:
-            try:
-                ws.close()
-            except Exception:
-                pass
-            raise
-
-    def _open_engineio3_polling(self):
-        """Fallback transport, matching the same EIO=3 Socket.IO protocol."""
-        session = requests.Session()
-        session.headers.update({
+        return {
             "Origin": ORIGIN,
             "Referer": REFERER,
             "User-Agent": str(self.auth.get("userAgent", "Mozilla/5.0")),
-            "Accept": "*/*",
-        })
-        poll_url = WS_URL.replace("wss://", "https://") + (
-            "?EIO=3&transport=polling&t=" + str(int(time.time() * 1000))
-        )
-        response = session.get(poll_url, timeout=12)
-        response.raise_for_status()
-        opening = response.text
-        if not isinstance(opening, str) or not opening.startswith("0"):
-            logger.warning(
-                "iPoker polling handshake returned a non-Engine.IO response; status=%s content_type=%s body_length=%s",
-                response.status_code,
-                response.headers.get("Content-Type", "")[:80],
-                len(opening) if isinstance(opening, str) else 0,
-            )
-            raise ConnectionError("Engine.IO polling opening packet was not received")
-        try:
-            handshake = json.loads(opening[1:])
-        except (ValueError, TypeError):
-            raise ConnectionError("Engine.IO polling handshake was malformed") from None
-        sid = handshake.get("sid") if isinstance(handshake, dict) else None
-        if not sid:
-            raise ConnectionError("Engine.IO polling handshake omitted session id")
-        ws_url = (
-            WS_URL
-            + "?EIO=3&transport=websocket&sid="
-            + str(sid)
-            + "&t="
-            + str(int(time.time() * 1000))
-        )
-        ws = websocket.create_connection(
-            ws_url,
-            timeout=12,
-            header=self._headers(),
-            enable_multithread=True,
-        )
-        try:
-            ws.send("2probe")
-            probe = ws.recv()
-            if isinstance(probe, bytes):
-                probe = probe.decode("utf-8", "replace")
-            if probe != "3probe":
-                raise ConnectionError("Engine.IO websocket upgrade probe was not accepted")
-            ws.send("5")
-            ws.send("40")
-            namespace = self.recv(ws, 12)
-            if namespace != "40":
-                raise ConnectionError("Socket.IO namespace connection was not accepted")
-            logger.info("ChampionPoker Engine.IO v3 polling fallback connected")
-            return ws
-        except Exception:
-            try:
-                ws.close()
-            except Exception:
-                pass
-            raise
+        }
 
-    def _open_engineio3(self):
-        logger.info("Opening ChampionPoker Socket.IO: websocket transport first")
-        direct_error_name = "unknown"
-        try:
-            return self._open_engineio3_direct()
-        except Exception as direct_error:
-            direct_error_name = type(direct_error).__name__
-            logger.warning(
-                "Direct iPoker websocket attempt failed: %s; trying Engine.IO polling fallback",
-                direct_error_name,
-            )
-        try:
-            return self._open_engineio3_polling()
-        except Exception as polling_error:
-            raise ConnectionError(
-                "Both Engine.IO transports failed "
-                f"(websocket={direct_error_name}, polling={type(polling_error).__name__})"
-            ) from None
+    def _open_socketio(self):
+        self.disconnect_event.clear()
+        self.incoming = queue.Queue()
+        sio = socketio.Client(
+            reconnection=False,
+            logger=False,
+            engineio_logger=False,
+            request_timeout=12,
+        )
+        sio.on("message", self._on_message)
+        sio.on("disconnect", self._on_disconnect)
+        # The actual PokerRender bundle uses Engine.IO protocol 3 and prefers
+        # direct WebSocket transport before polling. Force that same first path.
+        sio.connect(
+            SOCKET_URL,
+            headers=self._headers(),
+            transports=["websocket"],
+            socketio_path="socket.io",
+            wait_timeout=12,
+        )
+        self.sio = sio
+        if not sio.connected:
+            raise ConnectionError("Socket.IO namespace did not connect")
+        self.set(connected=True, last_error=None)
+        logger.info("ChampionPoker Socket.IO namespace connected using native client")
+        return sio
+
+    def _send(self, message):
+        client = self.sio
+        if client is None or not client.connected:
+            raise ConnectionError("Socket.IO disconnected before application send")
+        # Client.send() is the exact API used by PokerRender's SocketIOConnection.
+        client.send(message)
+
+    @staticmethod
+    def _decode_message(payload):
+        if isinstance(payload, dict):
+            return payload
+        if isinstance(payload, str):
+            try:
+                parsed = json.loads(payload)
+            except (ValueError, TypeError):
+                return None
+            return parsed if isinstance(parsed, dict) else None
+        return None
 
     @staticmethod
     def _class_id(message):
         return message.get("ID", message.get("classId"))
 
-    def _send(self, ws, message):
-        ws.send(encode_application_message(message))
+    def _process_message(self, message):
+        class_id = self._class_id(message)
+        if class_id == 60005:
+            self._send({"messageSeqId": 0, "classId": 60006})
+            return
 
-    def _process_frame(self, ws, frame):
-        message = decode_application_message(frame)
-        if message:
-            class_id = self._class_id(message)
-            if class_id == 60005:
-                # PokerRender's NetworkAliveTimeOutPingHandler replies with 60006.
-                self._send(ws, {
-                    "messageSeqId": message.get("messageSeqId", 0),
-                    "classId": 60006,
-                })
-                self._heartbeat_count += 1
-            if class_id == 50006 and self.remove_callback:
-                ids = message.get("containerIdsList") or []
-                if ids:
-                    result = self.remove_callback(ids)
-                    logger.info("iPoker catalogue removals processed: count=%s", result.get("removed", 0))
-        records, report = extract_tournaments([frame])
+        if class_id == 50006 and self.remove_callback:
+            ids = message.get("containerIdsList") or []
+            if ids:
+                result = self.remove_callback(ids)
+                logger.info("iPoker catalogue removals processed: count=%s", result.get("removed", 0))
+
+        # Feed one native 'message' event into the common parser.
+        records, report = extract_tournaments([["message", message]])
         if records:
-            saved = self.save_callback(records, None, "0.5.0-native-protocol")
+            saved = self.save_callback(records, None, "0.6.0-socketio-client")
             self.set(
                 last_catalog_at=datetime.now(timezone.utc).isoformat(),
                 catalog_count=saved.get("count", len(records)),
@@ -346,18 +247,19 @@ class IPokerWorker:
                 report.get("unique_tournaments", 0),
                 saved.get("count", len(records)),
             )
-        return message
 
-    def wait_for(self, ws, class_ids, timeout=25, check_error=False):
+    def _wait_for(self, class_ids, timeout=25, check_error=False):
         deadline = time.monotonic() + timeout
         while not self.stop_event.is_set() and time.monotonic() < deadline:
-            remaining = max(1, deadline - time.monotonic())
+            if self.sio is None or not self.sio.connected or self.disconnect_event.is_set():
+                raise ConnectionError("ChampionPoker disconnected the Socket.IO namespace")
             try:
-                frame = self.recv(ws, remaining)
-            except TimeoutError:
-                break
-            message = self._process_frame(ws, frame)
+                payload = self.incoming.get(timeout=min(1.0, max(0.1, deadline - time.monotonic())))
+            except queue.Empty:
+                continue
+            message = self._decode_message(payload)
             if not message:
+                logger.info("iPoker ignored non-JSON message event")
                 continue
             incoming_id = self._class_id(message)
             error_code = message.get("errorCode", 0)
@@ -366,6 +268,7 @@ class IPokerWorker:
                 incoming_id,
                 str(error_code)[:24],
             )
+            self._process_message(message)
             if incoming_id not in class_ids:
                 continue
             if check_error and str(error_code).strip() not in {"0", "0.0", "None"}:
@@ -384,37 +287,29 @@ class IPokerWorker:
         )
 
     def connect_once(self):
-        ws = self._open_engineio3()
+        sio = self._open_socketio()
         try:
-            self.set(connected=True, last_error=None)
             logger.info("Socket.IO connected; sending ClientServerHandshakeRequest (60200)")
-            self._send(ws, {
+            self._send({
                 "flag": 0,
                 "casinoName": CASINO,
                 "classId": 60200,
             })
-            self.wait_for(ws, {60201}, timeout=20, check_error=True)
+            self._wait_for({60201}, timeout=20, check_error=True)
             logger.info("Server handshake accepted (60201); registering client (50001)")
 
-            self._send(ws, build_register_client_request())
-            self.wait_for(ws, {50003}, timeout=20, check_error=True)
+            self._send(build_register_client_request(self.auth))
+            self._wait_for({50003}, timeout=20, check_error=True)
             logger.info("Client registered (50003); sending native PokerLoginRequest (60108)")
 
-            self._send(ws, self.auth)
-            login_response = self.wait_for(ws, {60109}, timeout=35, check_error=True)
+            self._send(self.auth)
+            self._wait_for({60109}, timeout=35, check_error=True)
             self.set(authenticated=True)
-            logger.info(
-                "ChampionPoker PokerLoginResponse accepted (60109); starting scheduled tournament feed"
-            )
+            logger.info("ChampionPoker PokerLoginResponse accepted (60109)")
 
             request_id = "Lobby_FilterSubscription_" + uuid.uuid4().hex
-            subscription = build_tournament_subscription(request_id=request_id)
-            self._send(ws, subscription)
-            ack = self.wait_for(ws, {50018}, timeout=25, check_error=True)
-            self._last_subscription_ack = {
-                "request_id": ack.get("requestId"),
-                "error_code": ack.get("errorCode", 0),
-            }
+            self._send(build_tournament_subscription(request_id=request_id))
+            ack = self._wait_for({50018}, timeout=25, check_error=True)
             self.set(subscribed=True)
             logger.info(
                 "Scheduled tournament filter subscription accepted (50018); request_id_matches=%s",
@@ -423,18 +318,27 @@ class IPokerWorker:
 
             next_ping = time.monotonic() + 25
             while not self.stop_event.is_set():
-                timeout = max(1, next_ping - time.monotonic())
+                if not sio.connected or self.disconnect_event.is_set():
+                    raise ConnectionError("ChampionPoker Socket.IO disconnected during catalogue stream")
+                timeout = max(0.1, next_ping - time.monotonic())
                 try:
-                    frame = self.recv(ws, timeout)
-                    self._process_frame(ws, frame)
-                except TimeoutError:
-                    self._send(ws, {"messageSeqId": 0, "classId": 60005})
-                    next_ping = time.monotonic() + 25
+                    payload = self.incoming.get(timeout=min(1.0, timeout))
+                except queue.Empty:
+                    if time.monotonic() >= next_ping:
+                        self._send({"messageSeqId": 0, "classId": 60005})
+                        next_ping = time.monotonic() + 25
+                    continue
+                message = self._decode_message(payload)
+                if message:
+                    self.set(last_message_at=datetime.now(timezone.utc).isoformat())
+                    self._process_message(message)
         finally:
             try:
-                ws.close()
+                if sio.connected:
+                    sio.disconnect()
             except Exception:
                 pass
+            self.sio = None
 
     def run(self):
         try:
@@ -468,6 +372,7 @@ class IPokerWorker:
         finally:
             with self.lock:
                 self.auth = None
+                self.sio = None
                 self.state.update(
                     running=False,
                     connected=False,
