@@ -1,0 +1,31 @@
+name: iPoker parser tests
+
+on:
+  push:
+    branches:
+      - feature/centralized-ipoker-parser
+    paths:
+      - "selector_backend/ipoker_*.py"
+      - "tests/test_ipoker_*.py"
+      - "requirements.txt"
+      - ".github/workflows/ipoker-parser-tests.yml"
+  pull_request:
+    branches:
+      - feature/centralized-ipoker-parser
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Run iPoker parser tests
+        run: |
+          pytest -q tests/test_ipoker_socketio.py tests/test_ipoker_catalog.py tests/test_ipoker_worker.py
