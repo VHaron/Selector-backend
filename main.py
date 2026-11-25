@@ -64,7 +64,7 @@ def _start_ipoker_collector():
         return
     try:
         login = login_and_get_temp_token()
-        result = _worker.start(build_auth_message(login))
+        result = _worker.start(build_auth_message(login), login.get("cookie_header"))
         logger.info("iPoker collector start requested: %s", result.get("status", "unknown"))
     except LoginProtocolError as exc:
         # LoginProtocolError messages are deliberately sanitized by the login module.
