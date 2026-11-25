@@ -54,7 +54,10 @@ def get_user(token: str):
         site = session_to_site.get(token, "globusgo")
     if not username:
         raise HTTPException(status_code=400, detail="Пользователь не найден")
-    # Keep existing GlobusGo profile keys intact; isolate GlobusMVP data.
+    # Local selector identities are independent from every poker-room account.
+    if site == "local":
+        return username
+    # Legacy keys are retained only for old data compatibility; no upstream login is used.
     return username if site == "globusgo" else f"{site}:{username}"
 
 
