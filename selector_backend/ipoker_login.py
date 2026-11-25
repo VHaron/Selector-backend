@@ -226,27 +226,24 @@ def login_and_get_temp_token() -> dict[str, Any]:
 
 
 def build_auth_message(login: dict[str, Any]) -> dict[str, Any]:
-    """Build the observed 60108 Socket.IO auth envelope from server config."""
-    username = str(login["username"])
+    """Build the observed ChampionPoker Hub2 login request (ID 33036)."""
     return {
-        "classId": 60108,
-        "tempToken": str(login["temp_token"]),
-        "usernameOrNickname": username,
-        "usernameLogin": True,
-        "loginType": int(os.getenv("IPOKER_LOGIN_TYPE", "1")),
-        "realMode": bool(login["real_mode"]),
+        "ID": 33036,
+        "responses": [31002, 31009],
+        "description": "Login with existing Session token",
+        "logoutOnDisconnectBehaviour": "hierarchical",
+        "logoutOnDisconnect": True,
+        "waitingMessages": False,
+        "realMode": 1 if login.get("real_mode", True) else 0,
         "casinoName": CASINO,
-        "clientPlatform": int(os.getenv("IPOKER_CLIENT_PLATFORM_ID", "26")),
-        "clientVersion": os.getenv("IPOKER_CLIENT_VERSION", "26.7.1.26"),
-        "deviceFamily": os.getenv("IPOKER_DEVICE_FAMILY", "desktop"),
-        "deviceName": os.getenv("IPOKER_DEVICE_NAME", "Chrome on Windows"),
-        "deviceType": os.getenv("IPOKER_DEVICE_TYPE", "desktop"),
-        "hardSerial": os.getenv("IPOKER_HARD_SERIAL") or secrets.token_hex(16),
-        "softSerial": os.getenv("IPOKER_SOFT_SERIAL") or secrets.token_hex(16),
-        "languageCode": os.getenv("IPOKER_WS_LANGUAGE_CODE", "EN"),
-        "osVersion": os.getenv("IPOKER_OS_VERSION", "Windows"),
-        "platformType": int(os.getenv("IPOKER_PLATFORM_TYPE", "1")),
-        "supportedPokerServices": json.loads(os.getenv("IPOKER_SUPPORTED_SERVICES", "[]")),
-        "browser": os.getenv("IPOKER_BROWSER", "Chrome"),
-        "userAgent": os.getenv("IPOKER_USER_AGENT", "Mozilla/5.0"),
+        "clientVersion": os.getenv("IPOKER_CLIENT_VERSION", ""),
+        "clientPlatform": os.getenv("IPOKER_CLIENT_PLATFORM", "mobile"),
+        "clientType": "casino",
+        "languageCode": os.getenv("IPOKER_WS_LANGUAGE_CODE", "en"),
+        "deliveryPlatform": "Hub2",
+        "userName": str(login["username"]),
+        "sessionToken": str(login["temp_token"]),
+        "errorLevel": 1,
+        "relativeURI": "/poker",
+        "correlationId": "correlationId_" + str(uuid.uuid4()),
     }
