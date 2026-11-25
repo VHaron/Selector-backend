@@ -257,7 +257,27 @@ def ingest_ipoker_capture(payload: RawCaptureBatch, x_parser_admin_token: str | 
     frames = frames[-MAX_CAPTURE_FRAMES:]
     store = {"source": "ChampionPoker iPoker WebSocket", "updated_at": _utc_now(), "count": len(frames), "frames": frames}
     save_json_db(CAPTURE_FILE, store)
-    return {"status": "captured", "accepted": len(accepted), "total": len(frames), "updated_at": store["updated_at"]}
+
+    # Refresh the shared catalog as soon as the logged-in browser delivers a
+    # complete tournament-list message. Ignore sent frames and unrelated WS
+    # traffic; the collector never needs cookies, passwords, or auth headers.
+    received_payloads = [
+        frame.get("data") for frame in accepted
+        if str(frame.get("direction", "")).lower() in {"received", "in", "server"}
+    ]
+    tournaments, decode_report = extract_tournaments(received_payloads)
+    catalog_result = None
+    if tournaments:
+        catalog_result = _save_tournaments(tournaments, _utc_now(), "0.3.0-live-capture")
+
+    return {
+        "status": "captured",
+        "accepted": len(accepted),
+        "total": len(frames),
+        "updated_at": store["updated_at"],
+        "catalog": catalog_result,
+        "decode": decode_report,
+    }
 
 
 @router.get("/api/admin/ipoker/capture/status")
