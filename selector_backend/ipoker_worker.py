@@ -159,6 +159,7 @@ class IPokerWorker:
         self.incoming.put(payload)
 
     def _on_disconnect(self):
+        logger.warning("ChampionPoker Socket.IO namespace DISCONNECT received")
         self.disconnect_event.set()
         self.set(connected=False, subscribed=False)
 
@@ -186,6 +187,9 @@ class IPokerWorker:
         # CONNECT callback. A worker-thread wait races the reader thread; the
         # server disconnects if the first application message is delayed.
         def on_namespace_connect():
+            # Ignore a stale disconnect packet that may arrive before a fresh
+            # root-namespace CONNECT during server-side session replacement.
+            self.disconnect_event.clear()
             logger.info("Socket.IO root namespace CONNECT; sending 60200 immediately")
             sio.send({"flag": 0, "casinoName": CASINO, "classId": 60200})
             namespace_ready.set()
