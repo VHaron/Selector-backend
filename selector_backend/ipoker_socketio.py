@@ -9,10 +9,7 @@ import hashlib
 import json
 from typing import Any, Iterable
 
-DEFAULT_TOURNAMENT_FILTER = (
-    "@game_type@ in (1, 2, 18, 6, 3, 16, 19, 13, 5, 14, 20, 21) "
-    "and @start_type@=1"
-)
+DEFAULT_TOURNAMENT_FILTER = "@start_type@=1"
 
 
 def _loads_socket_frame(frame: Any) -> Any | None:
@@ -74,8 +71,9 @@ def encode_application_message(message: dict[str, Any]) -> str:
     """Encode an application object as the observed Engine.IO v3 Socket.IO event."""
     if not isinstance(message, dict):
         raise TypeError("message must be a dict")
-    # Match the observed Engine.IO v3 Socket.IO event packet.
-    return "42" + json.dumps(["message", message], ensure_ascii=False, separators=(",", ":"))
+    # Socket.IO's second event argument is a JSON string, not a nested object.
+    payload = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+    return "42" + json.dumps(["message", payload], ensure_ascii=False, separators=(",", ":"))
 
 
 def build_tournament_subscription(
