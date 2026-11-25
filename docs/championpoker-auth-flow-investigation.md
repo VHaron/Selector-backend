@@ -56,3 +56,42 @@ The default integration configuration says system ID 5, while the authenticated-
 ## Updated assessment
 
 A backend implementation would need to reproduce a browser-oriented iframe/postMessage transport contract, or establish from a controlled, authorized test that the login server accepts the equivalent direct form POST. The client code alone does not prove that a raw backend POST is supported. Do not infer that the presence of a public JavaScript function guarantees a headless login will succeed.
+
+
+## Tournament catalogue WebSocket protocol (verified from the captured session)
+
+The HAR contains a complete authenticated Socket.IO session and the first bulk tournament catalogue exchange. The following protocol facts were extracted from message structure; account/session values are intentionally omitted.
+
+### Lobby bootstrap and subscription
+
+- After the Engine.IO / Socket.IO handshake, the client sends lobby initialization (classId 50001) and receives lobby/session configuration (50003), server time-zone information (50026), and other lobby metadata.
+- The client later sends classId 50017, the observed tournament-container subscription request:
+  - subscriptionType: 1
+  - containerType: 1
+  - subContainerType: 4
+  - fun: false
+  - filter expression: @game_type@ in (1, 2, 18, 6, 3, 16, 19, 13, 5, 14, 20, 21) and @start_type@=1
+- The server acknowledges this subscription with classId 50018, errorCode 0.
+- The first classId 40001 response arrived with 8 records, followed by a bulk response with 1,314 records. Additional 40001 messages carried smaller subsequent batches/updates. Across the captured HAR, 1,541 tournament records were present before deduplication.
+- The tournament list is not nested directly as a flat record. Each item has containerId and tournamentGrid. The tournamentGrid object carries the actual schedule attributes.
+- The client sends classId 50088 lobby-content requests for LCT_HOME and LCT_TWISTER; these are separate lobby widgets/content requests and are not the main tournament catalogue subscription.
+
+### Tournament record fields observed
+
+The tournamentGrid union includes (among others): name, nameTranslationsList, gameType, startDate, originalStartDate, registrationStartDate, registrationEndDate, endDate, buyIn, fee, buyInFeeJackpotFee, cur, guaranteedPrize, prizePool, prizeType, status, startType, tournamentType, mode, speedMode, speedGameplay, tableSize, maxPlayers, registeredPlayers, totalPlayers, lateRegistration, lateRegistrationStatus, reEntryEnabled, rebuyAddonAllowed, maxBuyinsCount, knockOutFee, knockOutProgressionFactor, mysteryBountyTournament, isBountyInTournamentMoney, presumableDuration, levelDuration, startStack, tagList, promoTags, and gridImageUrl. Optional fields vary by tournament; do not assume every record has every key.
+
+### Implications for the parser
+
+- The existing frame decoder's classId 40001 extraction is aligned with the actual catalogue stream.
+- A live worker should authenticate, complete lobby bootstrap, send the 50017 subscription, wait for the 50018 acknowledgement, and consume every 40001 batch/update. It should upsert by containerId, not assume the first response is the entire catalogue.
+- Keep the subscription filter configurable. The captured filter requests multiple game types and scheduled-start tournaments; it is evidence of this client session's request, not proof that it is the only valid filter for every lobby.
+- Handle Socket.IO heartbeat/ping traffic and reconnects separately from tournament data. The HAR contains frequent application heartbeat messages; do not treat them as catalogue updates.
+- The HAR demonstrates the authenticated browser's subscription protocol, but it does not establish that a backend can obtain a valid login token unattended. Authentication remains a separate unverified dependency as described above.
+
+## Updated progress
+
+- Tournament subscription request (50017) and successful acknowledgement (50018): confirmed.
+- Bulk tournament list response (40001) and nested record shape (containerId + tournamentGrid): confirmed.
+- Bulk response observed: 1,314 records; total records across captured frames: 1,541 before deduplication.
+- Full field union from the captured records: documented above.
+- A clean server-side authentication exchange and standalone Railway WebSocket worker: not yet implemented or verified.
