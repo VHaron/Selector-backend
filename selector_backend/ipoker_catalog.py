@@ -341,7 +341,7 @@ def login_and_start_ipoker_worker(x_parser_admin_token: str | None = Header(defa
     try:
         login = login_and_get_temp_token()
         auth_message = build_auth_message(login)
-        result = _worker.start(auth_message)
+        result = _worker.start(auth_message, login.get("cookie_header"))
         # Never return the token, credentials, or full auth envelope.
         return {
             **result,
