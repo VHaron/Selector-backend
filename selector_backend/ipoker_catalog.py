@@ -180,3 +180,69 @@ def import_ipoker_tournaments(
         "count": len(deduplicated),
         "file": os.path.basename(CATALOG_FILE),
     }
+
+
+class RawCaptureBatch(BaseModel):
+    """Raw browser-observed iPoker WebSocket frames; binary payloads stay base64."""
+    frames: list[dict[str, Any]] = Field(min_length=1, max_length=500)
+
+
+CAPTURE_FILE = get_db_path("ipoker_ws_capture_db.json")
+MAX_CAPTURE_FRAMES = 20000
+
+
+@router.post("/api/admin/ipoker/capture")
+def ingest_ipoker_capture(
+    payload: RawCaptureBatch,
+    x_parser_admin_token: str | None = Header(default=None),
+):
+    """Receive live frames from the administrator's logged-in browser; never from players."""
+    _require_admin(x_parser_admin_token)
+    capture = load_json_db(CAPTURE_FILE)
+    frames = capture.get("frames", []) if isinstance(capture, dict) else []
+    accepted = []
+    for frame in payload.frames:
+        direction = str(frame.get("direction", "unknown"))[:16]
+        data = frame.get("data")
+        if not isinstance(data, (str, dict, list, int, float, bool)) and data is not None:
+            continue
+        # Keep each event bounded; binary data should be base64-encoded by the browser.
+        encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
+        if len(encoded) > 2_000_000:
+            continue
+        accepted.append({
+            "captured_at": str(frame.get("captured_at") or _utc_now()),
+            "direction": direction,
+            "kind": str(frame.get("kind", "message"))[:32],
+            "url": str(frame.get("url", ""))[:1000],
+            "data": data,
+        })
+    if not accepted:
+        raise HTTPException(status_code=422, detail="Нет допустимых WebSocket frames")
+    frames.extend(accepted)
+    frames = frames[-MAX_CAPTURE_FRAMES:]
+    store = {
+        "source": "ChampionPoker iPoker WebSocket",
+        "updated_at": _utc_now(),
+        "count": len(frames),
+        "frames": frames,
+    }
+    save_json_db(CAPTURE_FILE, store)
+    return {"status": "captured", "accepted": len(accepted), "total": len(frames), "updated_at": store["updated_at"]}
+
+
+@router.get("/api/admin/ipoker/capture/status")
+def get_ipoker_capture_status(x_parser_admin_token: str | None = Header(default=None)):
+    _require_admin(x_parser_admin_token)
+    capture = load_json_db(CAPTURE_FILE)
+    frames = capture.get("frames", []) if isinstance(capture, dict) else []
+    by_direction: dict[str, int] = {}
+    for frame in frames:
+        direction = str(frame.get("direction", "unknown"))
+        by_direction[direction] = by_direction.get(direction, 0) + 1
+    return {
+        "count": len(frames),
+        "updated_at": capture.get("updated_at") if isinstance(capture, dict) else None,
+        "by_direction": by_direction,
+        "source": "ChampionPoker iPoker WebSocket",
+    }
