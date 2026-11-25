@@ -142,7 +142,8 @@ class IPokerWorker:
             self.wait_for(ws,{50003},20,True)
             logger.info("ChampionPoker lobby initialized (50003); requesting lobby tournament data")
             # Captured browser flow sends classId 60005 after 50003; server replies 60006.
-            ws.send(encode_application_message({"classId": 60005}))
+            # Browser sends this particular classId as a JSON string inside the event.
+            ws.send("42" + json.dumps(["message", json.dumps({"classId": 60005}, separators=(",", ":"))], separators=(",", ":")))
             self.set(subscribed=True)
             while not self.stop_event.is_set():
                 frame=self.recv(ws,60)
@@ -164,8 +165,11 @@ class IPokerWorker:
                     break
                 except Exception as exc:
                     # Log only transport diagnostics; never headers, cookies, or payloads.
-                    status_code = getattr(exc, "status_code", None)
-                    logger.warning("iPoker collector connection failed: %s status=%s", type(exc).__name__, status_code)
+                    status_code = getattr(exc, "status_code", getattr(exc, "status", None))
+                    reason = getattr(exc, "resp", None)
+                    reason = getattr(reason, "reason", None) if reason is not None else None
+                    # Never log response headers: they may contain cookies or session material.
+                    logger.warning("iPoker collector connection failed: %s status=%s reason=%s", type(exc).__name__, status_code, str(reason)[:120] if reason else None)
                     self.set(connected=False,authenticated=False,subscribed=False,last_error=type(exc).__name__)
                     if self.stop_event.wait(10): break
                     self.set(reconnects=self.status()["reconnects"]+1)
