@@ -163,6 +163,33 @@ def _public_record(item: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in item.items() if key != "raw"}
 
 
+def _merge_tournaments(tournaments: list[dict[str, Any]], collected_at: str | None, collector_version: str) -> dict[str, Any]:
+    """Merge incremental WebSocket batches into the current catalogue."""
+    normalized = [normalize_tournament(item) for item in tournaments]
+    store = _read_store()
+    by_id = {
+        str(item.get("id")): item
+        for item in store.get("tournaments", [])
+        if isinstance(item, dict) and item.get("id") is not None
+    }
+    for item in normalized:
+        by_id[item["id"]] = item
+    if not by_id:
+        raise HTTPException(status_code=422, detail="Коллектор не передал ни одного турнира")
+    merged = list(by_id.values())[-MAX_TOURNAMENTS:]
+    collected_at = collected_at or _utc_now()
+    saved = {
+        "source": "ChampionPoker iPoker",
+        "updated_at": collected_at,
+        "received_at": _utc_now(),
+        "collector_version": collector_version,
+        "tournaments": merged,
+    }
+    save_json_db(CATALOG_FILE, saved)
+    return {"status": "merged", "updated_at": collected_at, "count": len(merged),
+            "received": len(normalized), "file": os.path.basename(CATALOG_FILE)}
+
+
 def _save_tournaments(tournaments: list[dict[str, Any]], collected_at: str | None, collector_version: str) -> dict[str, Any]:
     normalized = [normalize_tournament(item) for item in tournaments]
     deduplicated: dict[str, dict[str, Any]] = {}
@@ -268,7 +295,7 @@ def ingest_ipoker_capture(payload: RawCaptureBatch, x_parser_admin_token: str | 
     tournaments, decode_report = extract_tournaments(received_payloads)
     catalog_result = None
     if tournaments:
-        catalog_result = _save_tournaments(tournaments, _utc_now(), "0.3.0-live-capture")
+        catalog_result = _merge_tournaments(tournaments, _utc_now(), "0.3.0-live-capture")
 
     return {
         "status": "captured",
@@ -295,7 +322,7 @@ def get_ipoker_capture_status(x_parser_admin_token: str | None = Header(default=
 
 # Assisted WebSocket worker controls. Runtime auth material is never persisted or returned.
 from .ipoker_worker import IPokerWorker
-_worker = IPokerWorker(_save_tournaments)
+_worker = IPokerWorker(_merge_tournaments)
 
 class WorkerStart(BaseModel):
     auth_message: dict[str, Any]
