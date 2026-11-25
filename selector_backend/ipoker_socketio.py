@@ -53,6 +53,14 @@ def decode_application_message(frame: Any) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def encode_legacy_application_message(message: dict[str, Any]) -> str:
+    """Encode a Socket.IO 0.9 event packet for the captured /socket.io/1/ transport."""
+    if not isinstance(message, dict):
+        raise TypeError("message must be a dict")
+    event = {"name": "message", "args": [message]}
+    return "5:::" + json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+
+
 def encode_application_message(message: dict[str, Any]) -> str:
     """Encode an application object as the observed Engine.IO v3 Socket.IO event."""
     if not isinstance(message, dict):
