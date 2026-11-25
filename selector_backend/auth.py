@@ -218,3 +218,24 @@ def verify_mfa(req: MFARequest):
         raise HTTPException(status_code=502, detail=f"Ошибка проверки 2FA на {site}: {str(e)}")
 
 
+
+
+# === ЛОКАЛЬНАЯ СЕССИЯ СЕЛЕКТОРА (БЕЗ ВХОДА В ПОКЕР-РУМЫ) ===
+from pydantic import BaseModel, Field
+
+class LocalSessionRequest(BaseModel):
+    client_id: str = Field(min_length=16, max_length=128)
+
+@router.post("/api/session")
+def create_local_session(req: LocalSessionRequest):
+    """Create an app-only session. No credentials or requests to any poker room."""
+    client_id = req.client_id.strip()
+    if not client_id or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for ch in client_id):
+        raise HTTPException(status_code=400, detail="Некорректный идентификатор клиента")
+    token = str(uuid.uuid4())
+    local_session = requests.Session()
+    with auth_state_lock:
+        sessions[token] = local_session
+        session_to_user[token] = f"local:{client_id}"
+        session_to_site[token] = "local"
+    return {"status": "success", "session_token": token, "site": "local"}
