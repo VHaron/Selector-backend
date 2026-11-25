@@ -21,5 +21,5 @@ def test_client_hints_is_json_object():
     import json
 
     hints = json.loads(_client_hints())
-    assert hints["Sec-CH-UA-Platform"] == "Windows"
-    assert any(item["brand"] == "Google Chrome" for item in hints["Sec-CH-UA-Full-Version-List"])
+    assert hints["Sec-CH-UA-Platform"] == '"Android"'
+    assert '"Google Chrome";v="157.0.8103.79"' in hints["Sec-CH-UA-Full-Version-List"]
