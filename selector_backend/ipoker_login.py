@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 from typing import Any
 from urllib.parse import urlencode
 
@@ -137,4 +138,32 @@ def login_and_get_temp_token() -> dict[str, Any]:
         "login_type": "password",
         "real_mode": os.getenv("IPOKER_REAL_MODE", "1") not in {"0", "false", "False"},
         "session_cookie_count": len(session.cookies),
+    }
+
+
+
+def build_auth_message(login: dict[str, Any]) -> dict[str, Any]:
+    """Build the observed 60108 Socket.IO auth envelope from server config."""
+    username = str(login["username"])
+    return {
+        "classId": 60108,
+        "tempToken": str(login["temp_token"]),
+        "usernameOrNickname": username,
+        "usernameLogin": True,
+        "loginType": int(os.getenv("IPOKER_LOGIN_TYPE", "1")),
+        "realMode": bool(login["real_mode"]),
+        "casinoName": CASINO,
+        "clientPlatform": int(os.getenv("IPOKER_CLIENT_PLATFORM_ID", "26")),
+        "clientVersion": os.getenv("IPOKER_CLIENT_VERSION", "26.7.1.26"),
+        "deviceFamily": os.getenv("IPOKER_DEVICE_FAMILY", "desktop"),
+        "deviceName": os.getenv("IPOKER_DEVICE_NAME", "Railway server"),
+        "deviceType": os.getenv("IPOKER_DEVICE_TYPE", "desktop"),
+        "hardSerial": os.getenv("IPOKER_HARD_SERIAL") or secrets.token_hex(16),
+        "softSerial": os.getenv("IPOKER_SOFT_SERIAL") or secrets.token_hex(16),
+        "languageCode": os.getenv("IPOKER_LANGUAGE_CODE", "EN"),
+        "osVersion": os.getenv("IPOKER_OS_VERSION", "Linux"),
+        "platformType": int(os.getenv("IPOKER_PLATFORM_TYPE", "1")),
+        "supportedPokerServices": json.loads(os.getenv("IPOKER_SUPPORTED_SERVICES", "[]")),
+        "browser": os.getenv("IPOKER_BROWSER", "Chrome"),
+        "userAgent": os.getenv("IPOKER_USER_AGENT", "Mozilla/5.0"),
     }
