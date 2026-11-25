@@ -27,6 +27,15 @@ def _loads_socket_frame(frame: Any) -> Any | None:
     # ChampionPoker lobby uses Engine.IO v3 + Socket.IO event packets.
     if text.startswith("42"):
         text = text[2:]
+    elif text.startswith("5:::"):
+        try:
+            event = json.loads(text[4:])
+            if isinstance(event, dict) and event.get("name") == "message":
+                args = event.get("args") or []
+                return ["message", args[0]] if args else None
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return None
     elif text.startswith("3:::"):
         text = text[4:]
     elif text.startswith("4") and len(text) > 1 and text[1] in "[{":
