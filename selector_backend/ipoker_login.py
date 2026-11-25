@@ -221,6 +221,7 @@ def login_and_get_temp_token() -> dict[str, Any]:
         "login_type": "password",
         "real_mode": real_mode not in {"0", "false", "False"},
         "session_cookie_count": len(session.cookies),
+        "cookie_header": "; ".join(f"{cookie.name}={cookie.value}" for cookie in session.cookies),
     }
 
 
