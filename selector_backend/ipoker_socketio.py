@@ -24,7 +24,11 @@ def _loads_socket_frame(frame: Any) -> Any | None:
     if not isinstance(frame, str):
         return frame if isinstance(frame, (dict, list)) else None
     text = frame.strip()
-    if text.startswith("42"):
+    # ChampionPoker browser capture uses the legacy Socket.IO message packet
+    # (3:::<JSON>), not the newer event packet (42["message", ...]).
+    if text.startswith("3:::"):
+        text = text[4:]
+    elif text.startswith("42"):
         text = text[2:]
     elif text.startswith("4") and len(text) > 1 and text[1] in "[{":
         text = text[1:]
@@ -54,8 +58,9 @@ def encode_application_message(message: dict[str, Any]) -> str:
     """Encode an application object as the observed Engine.IO v3 Socket.IO event."""
     if not isinstance(message, dict):
         raise TypeError("message must be a dict")
-    payload = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
-    return "42" + json.dumps(["message", payload], ensure_ascii=False, separators=(",", ":"))
+    # Match the exact legacy packet observed in ChampionPoker DevTools:
+    # 3:::{"ID":33036,...}
+    return "3:::" + json.dumps(message, ensure_ascii=False, separators=(",", ":"))
 
 
 def build_tournament_subscription(
