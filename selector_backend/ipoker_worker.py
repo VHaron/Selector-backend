@@ -163,7 +163,9 @@ class IPokerWorker:
                     self.set(connected=False,authenticated=False,subscribed=False,running=False,last_error=type(exc).__name__)
                     break
                 except Exception as exc:
-                    logger.warning("iPoker collector connection failed: %s", type(exc).__name__)
+                    # Log only transport diagnostics; never headers, cookies, or payloads.
+                    status_code = getattr(exc, "status_code", None)
+                    logger.warning("iPoker collector connection failed: %s status=%s", type(exc).__name__, status_code)
                     self.set(connected=False,authenticated=False,subscribed=False,last_error=type(exc).__name__)
                     if self.stop_event.wait(10): break
                     self.set(reconnects=self.status()["reconnects"]+1)
