@@ -30,7 +30,7 @@ class AuthenticationRejected(Exception):
 class IPokerWorker:
     def __init__(self, save_callback):
         self.save_callback=save_callback; self.lock=threading.RLock(); self.stop_event=threading.Event(); self.thread=None; self.auth=None; self.cookie_header=None; self.legacy_socketio=False
-        self.state={"running":False,"connected":False,"authenticated":False,"subscribed":False,"last_message_at":None,"last_catalog_at":None,"catalog_count":0,"last_error":None,"reconnects":0}
+        self.state={"running":False,"connected":False,"authenticated":False,"subscribed":False,"last_message_at":None,"last_catalog_at":None,"catalog_count":0,"last_error":None,"reconnects":0}; self._heartbeat_count=0; self._transport_frame_count=0
     def status(self):
         with self.lock: return dict(self.state)
     def set(self, **kw):
@@ -54,10 +54,17 @@ class IPokerWorker:
             if isinstance(frame,bytes): frame=frame.decode("utf-8","replace")
             if self.legacy_socketio and (frame == "2::" or frame.startswith("2:::")):
                 # Socket.IO 0.9 heartbeat packet (distinct from Engine.IO v3 ping).
+                self._heartbeat_count += 1
+                if self._heartbeat_count == 1 or self._heartbeat_count % 3 == 0:
+                    logger.info("iPoker legacy heartbeat received; count=%s", self._heartbeat_count)
                 ws.send("2::")
                 continue
             if frame=="2": ws.send("3"); continue
             if frame.startswith("2"): ws.send("3"+frame[1:]); continue
+            self._transport_frame_count += 1
+            # Log only packet type/length; never expose application payloads or credentials.
+            packet_prefix = frame.split(":", 1)[0][:12] if isinstance(frame, str) else "binary"
+            logger.info("iPoker non-heartbeat frame received; packet_prefix=%s length=%s count=%s", packet_prefix, len(frame) if hasattr(frame, "__len__") else 0, self._transport_frame_count)
             self.set(last_message_at=datetime.now(timezone.utc).isoformat())
             return frame
         raise RuntimeError("Stopped")
