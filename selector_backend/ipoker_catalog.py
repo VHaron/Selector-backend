@@ -360,7 +360,7 @@ def get_ipoker_capture_status(x_parser_admin_token: str | None = Header(default=
 
 # Assisted WebSocket worker controls. Runtime auth material is never persisted or returned.
 from .ipoker_worker import IPokerWorker
-from .ipoker_login import LoginProtocolError, build_auth_message, login_and_get_temp_token
+from .ipoker_login import CaptchaRequired, LoginProtocolError, build_auth_message, login_and_get_temp_token
 _worker = IPokerWorker(_merge_tournaments, _remove_tournaments)
 
 class WorkerStart(BaseModel):
@@ -400,6 +400,8 @@ def login_and_start_ipoker_worker(x_parser_admin_token: str | None = Header(defa
             "authentication": "token_obtained",
             "session_cookie_count": login.get("session_cookie_count", 0),
         }
+    except CaptchaRequired as exc:
+        raise HTTPException(status_code=428, detail=str(exc))
     except LoginProtocolError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     except (ValueError, RuntimeError) as exc:
