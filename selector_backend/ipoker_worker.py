@@ -52,6 +52,10 @@ class IPokerWorker:
             except websocket.WebSocketTimeoutException: continue
             if frame is None: raise ConnectionError("Socket closed")
             if isinstance(frame,bytes): frame=frame.decode("utf-8","replace")
+            if self.legacy_socketio and (frame == "2::" or frame.startswith("2:::")):
+                # Socket.IO 0.9 heartbeat packet (distinct from Engine.IO v3 ping).
+                ws.send("2::")
+                continue
             if frame=="2": ws.send("3"); continue
             if frame.startswith("2"): ws.send("3"+frame[1:]); continue
             self.set(last_message_at=datetime.now(timezone.utc).isoformat())
@@ -187,7 +191,7 @@ class IPokerWorker:
             "responses": [35686, 35687], "errorLevel": 1,
             "relativeURI": "/poker", "correlationId": country_correlation,
         }))
-        ws.send(encode_application_message({
+        ws.send(self._encode_application_message({
             "ID": 81405, "description": "IP address detection",
             "responses": [81406, 81407], "errorLevel": 1,
             "relativeURI": "/poker", "correlationId": ip_correlation,
