@@ -322,6 +322,7 @@ def get_ipoker_capture_status(x_parser_admin_token: str | None = Header(default=
 
 # Assisted WebSocket worker controls. Runtime auth material is never persisted or returned.
 from .ipoker_worker import IPokerWorker
+from .ipoker_login import LoginProtocolError, build_auth_message, login_and_get_temp_token
 _worker = IPokerWorker(_merge_tournaments)
 
 class WorkerStart(BaseModel):
@@ -344,3 +345,24 @@ def stop_ipoker_worker(x_parser_admin_token: str | None = Header(default=None)):
 def get_ipoker_worker_status(x_parser_admin_token: str | None = Header(default=None)):
     _require_admin(x_parser_admin_token)
     return _worker.status()
+
+
+
+@router.post("/api/admin/ipoker/worker/login")
+def login_and_start_ipoker_worker(x_parser_admin_token: str | None = Header(default=None)):
+    """Log in with the server-side admin account and start the live collector."""
+    _require_admin(x_parser_admin_token)
+    try:
+        login = login_and_get_temp_token()
+        auth_message = build_auth_message(login)
+        result = _worker.start(auth_message)
+        # Never return the token, credentials, or full auth envelope.
+        return {
+            **result,
+            "authentication": "token_obtained",
+            "session_cookie_count": login.get("session_cookie_count", 0),
+        }
+    except LoginProtocolError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
