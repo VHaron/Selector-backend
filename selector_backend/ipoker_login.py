@@ -27,6 +27,10 @@ class LoginProtocolError(RuntimeError):
     pass
 
 
+class CaptchaRequired(LoginProtocolError):
+    """The operator must complete the site's interactive CAPTCHA challenge."""
+
+
 def _required_env(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
@@ -219,9 +223,13 @@ def login_and_get_temp_token() -> dict[str, Any]:
     if isinstance(parsed, dict):
         code = parsed.get("errorCode")
         if code not in (None, 0, "0", "OK", "ok"):
+            if code in (301, "301"):
+                raise CaptchaRequired(
+                    "ChampionPoker requires interactive CAPTCHA verification; automatic login is paused"
+                )
             if code in (401, "401", 403, "403"):
                 raise LoginProtocolError("ChampionPoker rejected the credentials or requires account verification")
-            raise LoginProtocolError("ChampionPoker returned an authentication error")
+            raise LoginProtocolError(f"ChampionPoker returned authentication errorCode {str(code)[:24]}")
     token = _find_temp_token(parsed)
     if not token:
         conf = preauth_config if isinstance(preauth_config, dict) else {}
