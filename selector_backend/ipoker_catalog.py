@@ -163,17 +163,42 @@ def _public_record(item: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in item.items() if key != "raw"}
 
 
+def _merge_raw_values(previous: Any, incoming: Any) -> Any:
+    """Apply a partial publisher update without erasing fields it did not send.
+
+    PokerRender's TournamentMerger preserves old values for absent, null and
+    empty-array fields. We mirror that behavior while retaining raw payloads.
+    """
+    if incoming is None or incoming == []:
+        return previous
+    if isinstance(previous, dict) and isinstance(incoming, dict):
+        merged = dict(previous)
+        for key, value in incoming.items():
+            if value is None or value == []:
+                continue
+            merged[key] = _merge_raw_values(previous.get(key), value)
+        return merged
+    return incoming
+
+
 def _merge_tournaments(tournaments: list[dict[str, Any]], collected_at: str | None, collector_version: str) -> dict[str, Any]:
-    """Merge incremental WebSocket batches into the current catalogue."""
-    normalized = [normalize_tournament(item) for item in tournaments]
+    """Merge incremental TournamentPush batches by containerId."""
     store = _read_store()
     by_id = {
         str(item.get("id")): item
         for item in store.get("tournaments", [])
         if isinstance(item, dict) and item.get("id") is not None
     }
-    for item in normalized:
-        by_id[item["id"]] = item
+    received = 0
+    for raw in tournaments:
+        if not isinstance(raw, dict):
+            continue
+        item = normalize_tournament(raw)
+        previous = by_id.get(item["id"])
+        previous_raw = previous.get("raw") if isinstance(previous, dict) else None
+        merged_raw = _merge_raw_values(previous_raw, raw) if isinstance(previous_raw, dict) else raw
+        by_id[item["id"]] = normalize_tournament(merged_raw)
+        received += 1
     if not by_id:
         raise HTTPException(status_code=422, detail="Коллектор не передал ни одного турнира")
     merged = list(by_id.values())[-MAX_TOURNAMENTS:]
@@ -186,8 +211,35 @@ def _merge_tournaments(tournaments: list[dict[str, Any]], collected_at: str | No
         "tournaments": merged,
     }
     save_json_db(CATALOG_FILE, saved)
-    return {"status": "merged", "updated_at": collected_at, "count": len(merged),
-            "received": len(normalized), "file": os.path.basename(CATALOG_FILE)}
+    return {
+        "status": "merged",
+        "updated_at": collected_at,
+        "count": len(merged),
+        "received": received,
+        "file": os.path.basename(CATALOG_FILE),
+    }
+
+
+def _remove_tournaments(container_ids: list[Any]) -> dict[str, Any]:
+    """Remove publisher-expired container ids from the active catalogue."""
+    ids = {str(value) for value in container_ids if value is not None}
+    if not ids:
+        return {"removed": 0, "count": len(_read_store().get("tournaments", []))}
+    store = _read_store()
+    current = store.get("tournaments", [])
+    kept = [
+        item for item in current
+        if str(item.get("upstream_id")) not in ids
+        and str(item.get("id")) not in ids
+        and str(item.get("id")) not in {f"ipoker_{value}" for value in ids}
+    ]
+    removed = len(current) - len(kept)
+    if removed:
+        store["tournaments"] = kept
+        store["updated_at"] = _utc_now()
+        store["received_at"] = _utc_now()
+        save_json_db(CATALOG_FILE, store)
+    return {"removed": removed, "count": len(kept)}
 
 
 def _save_tournaments(tournaments: list[dict[str, Any]], collected_at: str | None, collector_version: str) -> dict[str, Any]:
@@ -309,7 +361,7 @@ def get_ipoker_capture_status(x_parser_admin_token: str | None = Header(default=
 # Assisted WebSocket worker controls. Runtime auth material is never persisted or returned.
 from .ipoker_worker import IPokerWorker
 from .ipoker_login import LoginProtocolError, build_auth_message, login_and_get_temp_token
-_worker = IPokerWorker(_merge_tournaments)
+_worker = IPokerWorker(_merge_tournaments, _remove_tournaments)
 
 class WorkerStart(BaseModel):
     auth_message: dict[str, Any]
@@ -341,7 +393,7 @@ def login_and_start_ipoker_worker(x_parser_admin_token: str | None = Header(defa
     try:
         login = login_and_get_temp_token()
         auth_message = build_auth_message(login)
-        result = _worker.start(auth_message, login.get("cookie_header"))
+        result = _worker.start(auth_message)
         # Never return the token, credentials, or full auth envelope.
         return {
             **result,
