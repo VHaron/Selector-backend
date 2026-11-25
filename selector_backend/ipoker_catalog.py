@@ -247,7 +247,7 @@ def ingest_ipoker_capture(payload: RawCaptureBatch, x_parser_admin_token: str | 
         if not isinstance(data, (str, dict, list, int, float, bool)) and data is not None:
             continue
         encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
-        if len(encoded) > 2_000_000:
+        if len(encoded) > 8_000_000:
             continue
         accepted.append({"captured_at": str(frame.get("captured_at") or _utc_now()), "direction": direction,
                          "kind": str(frame.get("kind", "message"))[:32], "url": str(frame.get("url", ""))[:1000], "data": data})
