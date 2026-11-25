@@ -62,14 +62,14 @@ class IPokerWorker:
             frame = self.recv(ws,max(1,end-time.monotonic()))
             msg=decode_application_message(frame)
             if msg:
-                incoming_id = msg.get("classId")
+                incoming_id = msg.get("ID", msg.get("classId"))
                 if incoming_id not in class_ids:
                     logger.info("iPoker upstream message while waiting: classId=%s", incoming_id)
             else:
                 # Log only the Socket.IO packet shape, never frame contents or auth material.
                 packet_type = frame[:2] if isinstance(frame, str) else type(frame).__name__
                 logger.info("iPoker upstream non-application frame: packet=%s length=%s", packet_type, len(frame) if hasattr(frame, "__len__") else 0)
-            if msg and msg.get("classId") in class_ids:
+            if msg and msg.get("ID", msg.get("classId")) in class_ids:
                 if check_error and str(msg.get("errorCode", 0)).strip() not in {"0", "0.0"}:
                     if 60109 in class_ids: raise AuthenticationRejected("ChampionPoker authentication rejected")
                     raise ConnectionError("Upstream rejected request")
