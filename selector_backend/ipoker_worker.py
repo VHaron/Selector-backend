@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 import websocket
 import requests
-from .ipoker_socketio import build_tournament_subscription, decode_application_message, encode_application_message, extract_tournaments
+from .ipoker_socketio import build_tournament_subscription, decode_application_message, encode_application_message, encode_legacy_application_message, extract_tournaments
 
 WS_URL = "wss://oapi-cur.techonlinecorp.com/socket.io/"
 ORIGIN = "https://games.championpoker.com"
@@ -29,7 +29,7 @@ class AuthenticationRejected(Exception):
 
 class IPokerWorker:
     def __init__(self, save_callback):
-        self.save_callback=save_callback; self.lock=threading.RLock(); self.stop_event=threading.Event(); self.thread=None; self.auth=None; self.cookie_header=None
+        self.save_callback=save_callback; self.lock=threading.RLock(); self.stop_event=threading.Event(); self.thread=None; self.auth=None; self.cookie_header=None; self.legacy_socketio=False
         self.state={"running":False,"connected":False,"authenticated":False,"subscribed":False,"last_message_at":None,"last_catalog_at":None,"catalog_count":0,"last_error":None,"reconnects":0}
     def status(self):
         with self.lock: return dict(self.state)
@@ -115,8 +115,15 @@ class IPokerWorker:
                         "User-Agent: " + user_agent],
                 cookie=self.cookie_header, enable_multithread=True,
             )
-            logger.info("Captured legacy handshake accepted; WebSocket established")
+            self.legacy_socketio = True
+            first_packet = self.recv(ws, 10)
+            if first_packet not in {"1::", "1::/"}:
+                try: ws.close()
+                except Exception: pass
+                raise ConnectionError("Legacy Socket.IO namespace connection was not accepted")
+            logger.info("Captured legacy Socket.IO namespace connected")
             return ws
+        self.legacy_socketio = False
         opening = response.text
         if not isinstance(opening, str) or not opening.startswith("0"):
             raise ConnectionError("Engine.IO v3 polling opening packet was not received")
@@ -165,11 +172,16 @@ class IPokerWorker:
                 pass
             raise
 
+    def _encode_application_message(self, message):
+        if self.legacy_socketio:
+            return encode_legacy_application_message(message)
+        return encode_application_message(message)
+
     def _send_initial_client_messages(self, ws):
         # These two requests are sent by the browser before Hub2 login.
         country_correlation = "correlationId_" + str(uuid.uuid4())
         ip_correlation = "correlationId_" + str(uuid.uuid4())
-        ws.send(encode_application_message({
+        ws.send(self._encode_application_message({
             "ID": 35685, "casino": "championpoker",
             "description": "Country by Geo IP detection",
             "responses": [35686, 35687], "errorLevel": 1,
@@ -188,7 +200,7 @@ class IPokerWorker:
             self.set(connected=True,last_error=None)
             logger.info("iPoker Engine.IO v3 websocket upgraded; sending browser initialization and Hub2 auth")
             self._send_initial_client_messages(ws)
-            ws.send(encode_application_message(self.auth))
+            ws.send(self._encode_application_message(self.auth))
             auth=self.wait_for(ws,{31002,31009},30,True)
             self.set(authenticated=True)
             # The browser trace proceeds from 31002 to lobby initialization;
@@ -198,12 +210,12 @@ class IPokerWorker:
             if refreshed_token:
                 self.auth["sessionToken"] = str(refreshed_token)
             logger.info("ChampionPoker Hub2 login accepted (31002); initializing lobby")
-            ws.send(encode_application_message(build_lobby_init(None)))
+            ws.send(self._encode_application_message(build_lobby_init(None)))
             self.wait_for(ws,{50003},20,True)
             logger.info("ChampionPoker lobby initialized (50003); requesting lobby tournament data")
             # Captured browser flow sends classId 60005 after 50003; server replies 60006.
             # Browser sends this particular classId as a JSON string inside the event.
-            ws.send("42" + json.dumps(["message", json.dumps({"classId": 60005}, separators=(",", ":"))], separators=(",", ":")))
+            ws.send(self._encode_application_message({"classId": 60005}))
             self.set(subscribed=True)
             while not self.stop_event.is_set():
                 frame=self.recv(ws,60)
