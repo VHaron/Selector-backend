@@ -8,7 +8,7 @@ import requests
 from .ipoker_socketio import build_tournament_subscription, decode_application_message, encode_application_message, extract_tournaments
 
 WS_URL = "wss://oapi-cur.techonlinecorp.com/socket.io/"
-ORIGIN = "https://www.championpoker.com"
+ORIGIN = "https://games.championpoker.com"
 logger = logging.getLogger("ipoker.worker")
 REQUIRED_AUTH_FIELDS = {"ID","responses","sessionToken","userName","casinoName","clientType","deliveryPlatform","correlationId"}
 
@@ -84,7 +84,7 @@ class IPokerWorker:
         session = requests.Session()
         session.headers.update({
             "Origin": ORIGIN,
-            "Referer": ORIGIN + "/",
+            "Referer": ORIGIN + "/poker",
             "User-Agent": user_agent,
             "Accept": "*/*",
         })
@@ -109,7 +109,7 @@ class IPokerWorker:
 
         headers = [
             "Origin: " + ORIGIN,
-            "Referer: " + ORIGIN + "/",
+            "Referer: " + ORIGIN + "/poker",
             "User-Agent: " + user_agent,
         ]
         cookie = session.cookies.get_dict()
