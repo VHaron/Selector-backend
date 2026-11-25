@@ -71,9 +71,10 @@ def encode_application_message(message: dict[str, Any]) -> str:
     """Encode an application object as the observed Engine.IO v3 Socket.IO event."""
     if not isinstance(message, dict):
         raise TypeError("message must be a dict")
-    # Socket.IO's second event argument is a JSON string, not a nested object.
-    payload = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
-    return "42" + json.dumps(["message", payload], ensure_ascii=False, separators=(",", ":"))
+    # Browser Socket.IO client calls socket.send(messageObject). Its EVENT
+    # argument is therefore the object itself (not a JSON string). Inbound
+    # server frames are often strings, but outbound requests are native objects.
+    return "42" + json.dumps(["message", message], ensure_ascii=False, separators=(",", ":"))
 
 
 def build_tournament_subscription(
