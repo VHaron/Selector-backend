@@ -187,7 +187,6 @@ class IPokerWorker:
             headers=self._headers(),
             transports=["websocket"],
             socketio_path="socket.io",
-            wait_timeout=12,
         )
         self.sio = sio
         if not sio.connected:
