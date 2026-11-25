@@ -65,26 +65,33 @@ def _as_bool(value: Any) -> bool | None:
 
 
 def normalize_tournament(raw: dict[str, Any]) -> dict[str, Any]:
-    """Normalize a native ChampionPoker container while retaining its raw shape."""
+    """Normalize the observed native ChampionPoker container; preserve raw values."""
     grid = raw.get("tournamentGrid") if isinstance(raw.get("tournamentGrid"), dict) else raw
     upstream_id = _first(raw, "containerId", "tournamentId", "tournament_id", "id", "uniqueId", "gameId")
     if upstream_id is None:
         stable = json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str)
         upstream_id = hashlib.sha256(stable.encode("utf-8")).hexdigest()[:20]
 
-    start = _first(grid, "startDate", "startDateTime", "startTime", "start_time", "scheduledStart")
-    if isinstance(start, (int, float)):
-        timestamp = start / 1000 if start > 10_000_000_000 else start
+    start_ms = _first(grid, "startDate", "startDateTime", "startTime", "start_time", "scheduledStart")
+    start = start_ms
+    if isinstance(start_ms, (int, float)):
+        timestamp = start_ms / 1000 if start_ms > 10_000_000_000 else start_ms
         start = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
 
     buyin = _first(grid, "buyIn", "buyin", "buy_in", "totalBuyIn", "entryFee")
     fee = _first(grid, "fee", "rake", "buyInFee")
-    total_buyin = (buyin + fee) if isinstance(buyin, (int, float)) and isinstance(fee, (int, float)) else buyin
+    fee_inclusive = _first(grid, "buyInFeeJackpotFee")
+    total_buyin = fee_inclusive if isinstance(fee_inclusive, (int, float)) else (
+        buyin + fee if isinstance(buyin, (int, float)) and isinstance(fee, (int, float)) else buyin
+    )
     currency = _first(grid, "cur", "currency", "currencyCode", "buyInCurrency")
     knockout_fee = _first(grid, "knockOutFee", "knockoutFee")
-    pko = _as_bool(_first(grid, "isPko", "isPKO", "progressiveKnockout", "knockout", "isKnockout"))
-    if pko is None and isinstance(knockout_fee, (int, float)):
-        pko = knockout_fee > 0
+    progression = _first(grid, "knockOutProgressionFactor")
+
+    # iPoker's positive knockOutFee identifies bounty money, but by itself does
+    # not prove the format is progressive. Keep PKO unknown until its enum is mapped.
+    pko = _as_bool(_first(grid, "isPko", "isPKO", "progressiveKnockout"))
+    is_knockout = isinstance(knockout_fee, (int, float)) and knockout_fee > 0
 
     return {
         "id": f"ipoker_{upstream_id}",
@@ -94,35 +101,51 @@ def normalize_tournament(raw: dict[str, Any]) -> dict[str, Any]:
         "room_id": "247",
         "name": str(_first(grid, "name", "tournamentName", "title", "displayName", default="iPoker tournament")),
         "time_start": str(start or ""),
+        "start_date_ms": start_ms,
         "buyin": buyin,
         "fee": fee,
         "total_buyin": total_buyin,
         "currency": currency,
         "gtd": _first(grid, "guaranteedPrize", "guarantee", "gtd", "prizePoolGuaranteed"),
         "prize_pool": _first(grid, "prizePool", "currentPrizePool"),
-        "afs": _first(grid, "maxPlayers", "maxRegistrations", "capacity"),
-        "registered_players": _first(grid, "registeredPlayers", "totalPlayers", "playersRegistered"),
+        "prize_pool_left": _first(grid, "prizePoolLeft"),
+        "afs": _first(grid, "maxPlayers"),
+        "registered_players": _first(grid, "registeredPlayers", "totalPlayers", "uniqueRegisteredPlayers"),
         "active_players": _first(grid, "activePlayers", "playersRemaining"),
         "table_size": _first(grid, "tableSize", "maxPlayersPerTable", "seats"),
-        "game_type": _first(grid, "gameType", "game"),
-        "bet_type": _first(grid, "betType", "limitType"),
+        "game_type": _first(grid, "gameType"),
+        "bet_type": _first(grid, "betType"),
         "status": _first(grid, "status", "tournamentStatus"),
         "color_index": _first(grid, "colorIndex"),
+        "start_type": _first(grid, "startType"),
         "buyin_type": _first(grid, "buyInType"),
         "prize_type": _first(grid, "prizeType"),
+        "tournament_type": _first(grid, "tournamentType"),
+        "promo_tags": _first(grid, "promoTags", default=[]),
         "is_pko": pko,
+        "is_knockout": is_knockout,
         "knockout_fee": knockout_fee,
-        "speed": _first(grid, "speed", "structure", "tournamentSpeed", "speedMode"),
+        "knockout_progression_factor": progression,
+        "is_mystery_bounty": _first(grid, "mysteryBountyTournament"),
+        "is_bounty_in_tournament_money": _first(grid, "isBountyInTournamentMoney"),
+        "is_battle_royale": _first(grid, "isBattleRoyale"),
+        "is_satellite": _first(grid, "satellite"),
+        "is_shootout": _first(grid, "shootout"),
+        "is_fast_progress": _first(grid, "isFastProgress"),
+        "speed_mode": _first(grid, "speedMode"),
         "late_registration": _first(grid, "lateRegistration"),
         "late_registration_status": _first(grid, "lateRegistrationStatus"),
-        "registration_start": _first(grid, "registrationStartDate"),
-        "registration_end": _first(grid, "registrationEndDate"),
-        "max_players": _first(grid, "maxPlayers"),
+        "registration_start_ms": _first(grid, "registrationStartDate"),
+        "registration_end_ms": _first(grid, "registrationEndDate"),
+        "late_registration_stop_ms": _first(grid, "lrStopTime"),
         "start_stack": _first(grid, "startStack"),
         "level_duration": _first(grid, "levelDuration"),
+        "re_entry_enabled": _first(grid, "reEntryEnabled"),
+        "multi_entry_enabled": _first(grid, "multiEntryEnabled"),
+        "direct_registration_allowed": _first(grid, "directRegistrationAllowed"),
+        "presumable_duration": _first(grid, "presumableDuration"),
         "raw": raw,
     }
-
 
 def _require_admin(token: str | None) -> None:
     expected = os.getenv(ADMIN_TOKEN_ENV, "")
