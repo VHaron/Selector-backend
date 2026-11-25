@@ -5,7 +5,7 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from selector_backend.auth import router as auth_router
+from selector_backend.local_session import router as local_session_router
 from selector_backend.profile import router as profile_router
 from selector_backend.tournaments import router as tournaments_router
 from selector_backend.smart_grid_api import router as smart_grid_router
@@ -36,7 +36,7 @@ app.add_middleware(
 def health_check():
     return {"status": "ok"}
 
-app.include_router(auth_router)
+app.include_router(local_session_router)
 app.include_router(profile_router)
 app.include_router(tournaments_router)
 app.include_router(smart_grid_router)
