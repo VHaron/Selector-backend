@@ -1,13 +1,18 @@
-"""Decode ChampionPoker/iPoker Socket.IO tournament lobby messages.
+"""Decode and build ChampionPoker/iPoker Socket.IO lobby messages.
 
-Accepts Engine.IO/Socket.IO text frames (not credentials or cookies), extracts
-tournamentsList, and preserves each complete upstream record for auditing.
+This module handles protocol frames only. It does not authenticate, store credentials,
+or establish a network connection.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 from typing import Any, Iterable
+
+DEFAULT_TOURNAMENT_FILTER = (
+    "@game_type@ in (1, 2, 18, 6, 3, 16, 19, 13, 5, 14, 20, 21) "
+    "and @start_type@=1"
+)
 
 
 def _loads_socket_frame(frame: Any) -> Any | None:
@@ -19,7 +24,6 @@ def _loads_socket_frame(frame: Any) -> Any | None:
     if not isinstance(frame, str):
         return frame if isinstance(frame, (dict, list)) else None
     text = frame.strip()
-    # Engine.IO packet type 4 + Socket.IO event packet type 2.
     if text.startswith("42"):
         text = text[2:]
     elif text.startswith("4") and len(text) > 1 and text[1] in "[{":
@@ -30,13 +34,11 @@ def _loads_socket_frame(frame: Any) -> Any | None:
         return None
 
 
-def decode_socketio_frame(frame: Any) -> dict[str, Any] | None:
-    """Return decoded iPoker application message, or None for unrelated frames."""
+def decode_application_message(frame: Any) -> dict[str, Any] | None:
+    """Decode a Socket.IO 'message' event into its application object."""
     packet = _loads_socket_frame(frame)
     if isinstance(packet, dict):
-        if isinstance(packet.get("tournamentsList"), list):
-            return packet
-        return None
+        return packet
     if not isinstance(packet, list) or len(packet) < 2 or packet[0] != "message":
         return None
     payload = packet[1]
@@ -45,8 +47,73 @@ def decode_socketio_frame(frame: Any) -> dict[str, Any] | None:
             payload = json.loads(payload)
         except json.JSONDecodeError:
             return None
-    if isinstance(payload, dict) and isinstance(payload.get("tournamentsList"), list):
-        return payload
+    return payload if isinstance(payload, dict) else None
+
+
+def encode_application_message(message: dict[str, Any]) -> str:
+    """Encode an application object as the observed Engine.IO v3 Socket.IO event."""
+    if not isinstance(message, dict):
+        raise TypeError("message must be a dict")
+    payload = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+    return "42" + json.dumps(["message", payload], ensure_ascii=False, separators=(",", ":"))
+
+
+def build_tournament_subscription(
+    request_id: str = "Lobby_FilterSubscription_7",
+    filter_expression: str = DEFAULT_TOURNAMENT_FILTER,
+) -> dict[str, Any]:
+    """Build the observed classId 50017 tournament-container subscription."""
+    if not request_id or not isinstance(request_id, str):
+        raise ValueError("request_id must be a non-empty string")
+    if not filter_expression or not isinstance(filter_expression, str):
+        raise ValueError("filter_expression must be a non-empty string")
+    return {
+        "subscriptionType": 1,
+        "containerType": 1,
+        "filter": {"value": filter_expression, "condition": None},
+        "fun": False,
+        "requestId": request_id,
+        "subContainerType": 4,
+        "classId": 50017,
+    }
+
+
+def build_tournament_subscription_frame(
+    request_id: str = "Lobby_FilterSubscription_7",
+    filter_expression: str = DEFAULT_TOURNAMENT_FILTER,
+) -> str:
+    """Return the encoded Socket.IO frame for a 50017 subscription."""
+    return encode_application_message(
+        build_tournament_subscription(request_id, filter_expression)
+    )
+
+
+def parse_tournament_subscription_ack(frame: Any) -> dict[str, Any] | None:
+    """Return a normalized 50018 acknowledgement, or None for another message."""
+    message = decode_application_message(frame)
+    if not message or message.get("classId") != 50018:
+        return None
+    error_code = message.get("errorCode")
+    return {
+        "request_id": message.get("requestId"),
+        "error_code": error_code,
+        "accepted": error_code == 0,
+        "message": message.get("message"),
+        "message_seq_id": message.get("messageSeqId"),
+    }
+
+
+def is_tournament_catalogue_frame(frame: Any) -> bool:
+    """Whether a decoded application frame is a 40001 catalogue batch."""
+    message = decode_application_message(frame)
+    return bool(message and message.get("classId") == 40001)
+
+
+def decode_socketio_frame(frame: Any) -> dict[str, Any] | None:
+    """Return decoded iPoker catalogue message, or None for unrelated frames."""
+    message = decode_application_message(frame)
+    if message and isinstance(message.get("tournamentsList"), list):
+        return message
     return None
 
 
