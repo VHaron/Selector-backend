@@ -17,6 +17,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from .storage import get_db_path, load_json_db, save_json_db
+from .ipoker_socketio import extract_tournaments
 
 router = APIRouter()
 CATALOG_FILE = get_db_path("ipoker_tournaments_db.json")
@@ -27,7 +28,13 @@ MAX_TOURNAMENTS = 10000
 class CatalogImport(BaseModel):
     tournaments: list[dict[str, Any]] = Field(min_length=1, max_length=MAX_TOURNAMENTS)
     collected_at: str | None = None
-    collector_version: str = "0.1.0"
+    collector_version: str = "0.2.0"
+
+
+class SocketIOImport(BaseModel):
+    frames: list[Any] = Field(min_length=1, max_length=500)
+    collected_at: str | None = None
+    collector_version: str = "0.2.0"
 
 
 def _utc_now() -> str:
@@ -58,43 +65,61 @@ def _as_bool(value: Any) -> bool | None:
 
 
 def normalize_tournament(raw: dict[str, Any]) -> dict[str, Any]:
-    upstream_id = _first(raw, "tournamentId", "tournament_id", "id", "uniqueId", "gameId")
+    """Normalize a native ChampionPoker container while retaining its raw shape."""
+    grid = raw.get("tournamentGrid") if isinstance(raw.get("tournamentGrid"), dict) else raw
+    upstream_id = _first(raw, "containerId", "tournamentId", "tournament_id", "id", "uniqueId", "gameId")
     if upstream_id is None:
         stable = json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str)
         upstream_id = hashlib.sha256(stable.encode("utf-8")).hexdigest()[:20]
 
-    start = _first(raw, "startDateTime", "startTime", "start_time", "startDate", "scheduledStart")
+    start = _first(grid, "startDate", "startDateTime", "startTime", "start_time", "scheduledStart")
     if isinstance(start, (int, float)):
-        # iPoker payloads commonly use Unix milliseconds.
         timestamp = start / 1000 if start > 10_000_000_000 else start
         start = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
 
-    buyin = _first(raw, "buyIn", "buyin", "buy_in", "totalBuyIn", "entryFee")
-    fee = _first(raw, "fee", "rake", "buyInFee")
-    currency = _first(raw, "currency", "currencyCode", "buyInCurrency")
-    pko = _as_bool(_first(raw, "isPko", "isPKO", "progressiveKnockout", "knockout", "isKnockout"))
+    buyin = _first(grid, "buyIn", "buyin", "buy_in", "totalBuyIn", "entryFee")
+    fee = _first(grid, "fee", "rake", "buyInFee")
+    total_buyin = (buyin + fee) if isinstance(buyin, (int, float)) and isinstance(fee, (int, float)) else buyin
+    currency = _first(grid, "cur", "currency", "currencyCode", "buyInCurrency")
+    knockout_fee = _first(grid, "knockOutFee", "knockoutFee")
+    pko = _as_bool(_first(grid, "isPko", "isPKO", "progressiveKnockout", "knockout", "isKnockout"))
+    if pko is None and isinstance(knockout_fee, (int, float)):
+        pko = knockout_fee > 0
 
     return {
         "id": f"ipoker_{upstream_id}",
+        "upstream_id": str(upstream_id),
         "source": "ipoker",
-        "room": "iPoker",
+        "room": "ChampionPoker",
         "room_id": "247",
-        "name": str(_first(raw, "name", "tournamentName", "title", "displayName", default="iPoker tournament")),
+        "name": str(_first(grid, "name", "tournamentName", "title", "displayName", default="iPoker tournament")),
         "time_start": str(start or ""),
         "buyin": buyin,
         "fee": fee,
+        "total_buyin": total_buyin,
         "currency": currency,
-        "gtd": _first(raw, "guaranteedPrize", "guarantee", "gtd", "prizePoolGuaranteed"),
-        "prize_pool": _first(raw, "prizePool", "currentPrizePool"),
-        "afs": _first(raw, "maxPlayers", "maxRegistrations", "capacity"),
-        "registered_players": _first(raw, "registeredPlayers", "totalPlayers", "playersRegistered"),
-        "active_players": _first(raw, "activePlayers", "playersRemaining"),
-        "table_size": _first(raw, "tableSize", "maxPlayersPerTable", "seats"),
-        "game_type": _first(raw, "gameType", "game"),
-        "bet_type": _first(raw, "betType", "limitType"),
-        "status": _first(raw, "status", "tournamentStatus"),
+        "gtd": _first(grid, "guaranteedPrize", "guarantee", "gtd", "prizePoolGuaranteed"),
+        "prize_pool": _first(grid, "prizePool", "currentPrizePool"),
+        "afs": _first(grid, "maxPlayers", "maxRegistrations", "capacity"),
+        "registered_players": _first(grid, "registeredPlayers", "totalPlayers", "playersRegistered"),
+        "active_players": _first(grid, "activePlayers", "playersRemaining"),
+        "table_size": _first(grid, "tableSize", "maxPlayersPerTable", "seats"),
+        "game_type": _first(grid, "gameType", "game"),
+        "bet_type": _first(grid, "betType", "limitType"),
+        "status": _first(grid, "status", "tournamentStatus"),
+        "color_index": _first(grid, "colorIndex"),
+        "buyin_type": _first(grid, "buyInType"),
+        "prize_type": _first(grid, "prizeType"),
         "is_pko": pko,
-        "speed": _first(raw, "speed", "structure", "tournamentSpeed"),
+        "knockout_fee": knockout_fee,
+        "speed": _first(grid, "speed", "structure", "tournamentSpeed", "speedMode"),
+        "late_registration": _first(grid, "lateRegistration"),
+        "late_registration_status": _first(grid, "lateRegistrationStatus"),
+        "registration_start": _first(grid, "registrationStartDate"),
+        "registration_end": _first(grid, "registrationEndDate"),
+        "max_players": _first(grid, "maxPlayers"),
+        "start_stack": _first(grid, "startStack"),
+        "level_duration": _first(grid, "levelDuration"),
         "raw": raw,
     }
 
@@ -115,6 +140,25 @@ def _public_record(item: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in item.items() if key != "raw"}
 
 
+def _save_tournaments(tournaments: list[dict[str, Any]], collected_at: str | None, collector_version: str) -> dict[str, Any]:
+    normalized = [normalize_tournament(item) for item in tournaments]
+    deduplicated: dict[str, dict[str, Any]] = {}
+    for item in normalized:
+        deduplicated[item["id"]] = item
+    if not deduplicated:
+        raise HTTPException(status_code=422, detail="Коллектор не передал ни одного турнира")
+    collected_at = collected_at or _utc_now()
+    store = {
+        "source": "ChampionPoker iPoker",
+        "updated_at": collected_at,
+        "received_at": _utc_now(),
+        "collector_version": collector_version,
+        "tournaments": list(deduplicated.values()),
+    }
+    save_json_db(CATALOG_FILE, store)
+    return {"status": "saved", "updated_at": collected_at, "count": len(deduplicated), "file": os.path.basename(CATALOG_FILE)}
+
+
 @router.get("/api/tournaments/catalog")
 def get_tournament_catalog():
     """Public read endpoint consumed by every selector user."""
@@ -128,58 +172,34 @@ def get_tournament_catalog():
             stale = age > 20 * 60
         except (TypeError, ValueError):
             stale = True
-    return {
-        "status": "ready" if tournaments else "empty",
-        "source": "ipoker",
-        "updated_at": updated_at,
-        "stale": stale,
-        "count": len(tournaments),
-        "data": [_public_record(item) for item in tournaments],
-    }
+    return {"status": "ready" if tournaments else "empty", "source": "ipoker", "updated_at": updated_at,
+            "stale": stale, "count": len(tournaments), "data": [_public_record(item) for item in tournaments]}
 
 
 @router.get("/api/admin/ipoker/status")
 def get_ipoker_parser_status(x_parser_admin_token: str | None = Header(default=None)):
     _require_admin(x_parser_admin_token)
     store = _read_store()
-    return {
-        "configured": True,
-        "updated_at": store.get("updated_at"),
-        "count": len(store.get("tournaments", [])),
-        "collector_version": store.get("collector_version"),
-        "source": store.get("source", "iPoker"),
-    }
+    return {"configured": True, "updated_at": store.get("updated_at"), "count": len(store.get("tournaments", [])),
+            "collector_version": store.get("collector_version"), "source": store.get("source", "iPoker")}
 
 
 @router.post("/api/admin/ipoker/import")
-def import_ipoker_tournaments(
-    payload: CatalogImport,
-    x_parser_admin_token: str | None = Header(default=None),
-):
-    """Private collector ingestion endpoint; never expose the admin token to players."""
+def import_ipoker_tournaments(payload: CatalogImport, x_parser_admin_token: str | None = Header(default=None)):
+    """Import already extracted raw iPoker tournament records."""
     _require_admin(x_parser_admin_token)
-    normalized = [normalize_tournament(item) for item in payload.tournaments]
-    deduplicated: dict[str, dict[str, Any]] = {}
-    for item in normalized:
-        deduplicated[item["id"]] = item
-    if not deduplicated:
-        raise HTTPException(status_code=422, detail="Коллектор не передал ни одного турнира")
+    return _save_tournaments(payload.tournaments, payload.collected_at, payload.collector_version)
 
-    collected_at = payload.collected_at or _utc_now()
-    store = {
-        "source": "iPoker",
-        "updated_at": collected_at,
-        "received_at": _utc_now(),
-        "collector_version": payload.collector_version,
-        "tournaments": list(deduplicated.values()),
-    }
-    save_json_db(CATALOG_FILE, store)
-    return {
-        "status": "saved",
-        "updated_at": collected_at,
-        "count": len(deduplicated),
-        "file": os.path.basename(CATALOG_FILE),
-    }
+
+@router.post("/api/admin/ipoker/import-frames")
+def import_ipoker_socketio_frames(payload: SocketIOImport, x_parser_admin_token: str | None = Header(default=None)):
+    """Decode Socket.IO lobby frames and atomically replace the shared catalog."""
+    _require_admin(x_parser_admin_token)
+    tournaments, report = extract_tournaments(payload.frames)
+    if not tournaments:
+        raise HTTPException(status_code=422, detail="В переданных WebSocket frames не найден tournamentsList")
+    result = _save_tournaments(tournaments, payload.collected_at, payload.collector_version)
+    return {**result, "decode": report}
 
 
 class RawCaptureBatch(BaseModel):
@@ -192,10 +212,7 @@ MAX_CAPTURE_FRAMES = 20000
 
 
 @router.post("/api/admin/ipoker/capture")
-def ingest_ipoker_capture(
-    payload: RawCaptureBatch,
-    x_parser_admin_token: str | None = Header(default=None),
-):
+def ingest_ipoker_capture(payload: RawCaptureBatch, x_parser_admin_token: str | None = Header(default=None)):
     """Receive live frames from the administrator's logged-in browser; never from players."""
     _require_admin(x_parser_admin_token)
     capture = load_json_db(CAPTURE_FILE)
@@ -206,27 +223,16 @@ def ingest_ipoker_capture(
         data = frame.get("data")
         if not isinstance(data, (str, dict, list, int, float, bool)) and data is not None:
             continue
-        # Keep each event bounded; binary data should be base64-encoded by the browser.
         encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
         if len(encoded) > 2_000_000:
             continue
-        accepted.append({
-            "captured_at": str(frame.get("captured_at") or _utc_now()),
-            "direction": direction,
-            "kind": str(frame.get("kind", "message"))[:32],
-            "url": str(frame.get("url", ""))[:1000],
-            "data": data,
-        })
+        accepted.append({"captured_at": str(frame.get("captured_at") or _utc_now()), "direction": direction,
+                         "kind": str(frame.get("kind", "message"))[:32], "url": str(frame.get("url", ""))[:1000], "data": data})
     if not accepted:
         raise HTTPException(status_code=422, detail="Нет допустимых WebSocket frames")
     frames.extend(accepted)
     frames = frames[-MAX_CAPTURE_FRAMES:]
-    store = {
-        "source": "ChampionPoker iPoker WebSocket",
-        "updated_at": _utc_now(),
-        "count": len(frames),
-        "frames": frames,
-    }
+    store = {"source": "ChampionPoker iPoker WebSocket", "updated_at": _utc_now(), "count": len(frames), "frames": frames}
     save_json_db(CAPTURE_FILE, store)
     return {"status": "captured", "accepted": len(accepted), "total": len(frames), "updated_at": store["updated_at"]}
 
@@ -240,9 +246,5 @@ def get_ipoker_capture_status(x_parser_admin_token: str | None = Header(default=
     for frame in frames:
         direction = str(frame.get("direction", "unknown"))
         by_direction[direction] = by_direction.get(direction, 0) + 1
-    return {
-        "count": len(frames),
-        "updated_at": capture.get("updated_at") if isinstance(capture, dict) else None,
-        "by_direction": by_direction,
-        "source": "ChampionPoker iPoker WebSocket",
-    }
+    return {"count": len(frames), "updated_at": capture.get("updated_at") if isinstance(capture, dict) else None,
+            "by_direction": by_direction, "source": "ChampionPoker iPoker WebSocket"}
