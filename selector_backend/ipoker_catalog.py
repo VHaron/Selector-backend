@@ -291,3 +291,29 @@ def get_ipoker_capture_status(x_parser_admin_token: str | None = Header(default=
         by_direction[direction] = by_direction.get(direction, 0) + 1
     return {"count": len(frames), "updated_at": capture.get("updated_at") if isinstance(capture, dict) else None,
             "by_direction": by_direction, "source": "ChampionPoker iPoker WebSocket"}
+
+
+# Assisted WebSocket worker controls. Runtime auth material is never persisted or returned.
+from .ipoker_worker import IPokerWorker
+_worker = IPokerWorker(_save_tournaments)
+
+class WorkerStart(BaseModel):
+    auth_message: dict[str, Any]
+
+@router.post("/api/admin/ipoker/worker/start")
+def start_ipoker_worker(payload: WorkerStart, x_parser_admin_token: str | None = Header(default=None)):
+    _require_admin(x_parser_admin_token)
+    try:
+        return _worker.start(payload.auth_message)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+@router.post("/api/admin/ipoker/worker/stop")
+def stop_ipoker_worker(x_parser_admin_token: str | None = Header(default=None)):
+    _require_admin(x_parser_admin_token)
+    return _worker.stop()
+
+@router.get("/api/admin/ipoker/worker/status")
+def get_ipoker_worker_status(x_parser_admin_token: str | None = Header(default=None)):
+    _require_admin(x_parser_admin_token)
+    return _worker.status()
