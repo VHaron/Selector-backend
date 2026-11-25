@@ -7,8 +7,7 @@ import websocket
 import requests
 from .ipoker_socketio import build_tournament_subscription, decode_application_message, encode_application_message, extract_tournaments
 
-HANDSHAKE_URL = "https://oapi-cur.techonlinecorp.com/socket.io/1/"
-WS_BASE_URL = "wss://oapi-cur.techonlinecorp.com/socket.io/1/websocket/"
+WS_URL = "wss://oapi-cur.techonlinecorp.com/socket.io/"
 ORIGIN = "https://www.championpoker.com"
 logger = logging.getLogger("ipoker.worker")
 REQUIRED_AUTH_FIELDS = {"ID","responses","sessionToken","userName","casinoName","clientType","deliveryPlatform","correlationId"}
@@ -21,7 +20,7 @@ def validate_auth_message(payload: dict[str, Any]) -> None:
     for key in ("sessionToken","userName","casinoName","clientType","deliveryPlatform","correlationId"):
         if not isinstance(payload.get(key),(str,int)) or not str(payload[key]).strip(): raise ValueError(f"auth_message.{key} must be non-empty")
 
-def build_lobby_init(session_id: str) -> dict[str, Any]:
+def build_lobby_init(session_id: str | None = None) -> dict[str, Any]:
     return {"classId":50001,"casinoName":"championpoker","casinoShortName":None,"casinoSkin":"championpoker","clientPlatform":26,"clientType":26,"clientVersion":"26.7.1.26","oldClientVersion":None,"isFun":False,"languageCode":"EN","previewClient":False,"sessionId":session_id,"subscibeLobbyContentRequest":False,"subscribeClientServices":True}
 
 class AuthenticationRejected(Exception):
@@ -77,25 +76,33 @@ class IPokerWorker:
                     raise ConnectionError("Upstream rejected request")
                 return msg
         raise TimeoutError("Expected upstream response timed out")
-    def _open_socketio09(self):
+    def _open_engineio3(self):
         user_agent = str(self.auth.get("userAgent", "Mozilla/5.0"))
-        headers = {"Origin": ORIGIN, "Referer": ORIGIN + "/", "User-Agent": user_agent}
+        headers = ["Origin: " + ORIGIN, "Referer: " + ORIGIN + "/",
+                   "User-Agent: " + user_agent]
         if self.cookie_header:
-            headers["Cookie"] = self.cookie_header
-        response = requests.get(HANDSHAKE_URL, params={"t": str(int(time.time() * 1000))},
-                                headers=headers, timeout=(8, 15))
-        if not response.ok:
-            raise ConnectionError("Socket.IO 0.9 handshake HTTP failure")
-        parts = response.text.strip().split(":")
-        if len(parts) < 4 or not parts[0] or "websocket" not in parts[3].split(","):
-            raise ConnectionError("Socket.IO 0.9 handshake response is invalid")
-        socket_id = parts[0]
-        ws_url = WS_BASE_URL + socket_id
-        ws = websocket.create_connection(ws_url, timeout=3, origin=ORIGIN,
-                                         cookie=self.cookie_header,
-                                         header=["User-Agent: " + user_agent,
-                                                 "Referer: " + ORIGIN + "/"],
+            headers.append("Cookie: " + self.cookie_header)
+        url = WS_URL + "?EIO=3&transport=websocket&t=" + str(int(time.time() * 1000))
+        ws = websocket.create_connection(url, timeout=8, header=headers,
                                          enable_multithread=True)
+        opening = ws.recv()
+        if isinstance(opening, bytes):
+            opening = opening.decode("utf-8", "replace")
+        if not isinstance(opening, str) or not opening.startswith("0"):
+            ws.close()
+            raise ConnectionError("Engine.IO v3 opening packet was not received")
+        try:
+            handshake = json.loads(opening[1:])
+        except (ValueError, TypeError):
+            ws.close()
+            raise ConnectionError("Engine.IO v3 handshake was malformed")
+        if not isinstance(handshake, dict) or not handshake.get("sid"):
+            ws.close()
+            raise ConnectionError("Engine.IO v3 handshake omitted sid")
+        ws.send("40")
+        namespace = self.recv(ws, 10)
+        if namespace != "40":
+            raise ConnectionError("Socket.IO namespace connection was not accepted")
         return ws
 
     def _send_initial_client_messages(self, ws):
@@ -115,32 +122,25 @@ class IPokerWorker:
         }))
 
     def connect_once(self):
-        logger.info("iPoker Socket.IO 0.9 handshake starting")
-        ws = self._open_socketio09()
+        logger.info("iPoker Engine.IO v3 websocket connecting")
+        ws = self._open_engineio3()
         try:
             self.set(connected=True,last_error=None)
-            logger.info("iPoker Socket.IO 0.9 connected; sending browser initialization and Hub2 auth")
+            logger.info("iPoker Engine.IO v3 connected; sending browser initialization and Hub2 auth")
             self._send_initial_client_messages(ws)
             ws.send(encode_application_message(self.auth))
             auth=self.wait_for(ws,{31002},30,True)
             self.set(authenticated=True)
-            # The server returns a refreshed session token in 31002. Keep it
-            # in memory only; the following 31009 response completes login.
+            # The browser trace proceeds from 31002 to lobby initialization;
+            # it does not wait for a 31009 response.
             auth_data = auth.get("data") if isinstance(auth.get("data"), dict) else {}
             refreshed_token = auth_data.get("sessionToken")
             if refreshed_token:
                 self.auth["sessionToken"] = str(refreshed_token)
-            logger.info("ChampionPoker Hub2 login accepted (31002); awaiting follow-up 31009")
-            followup = self.wait_for(ws,{31009},25,True)
-            sid = followup.get("sessionId") or (followup.get("data") or {}).get("sessionId")
-            if not isinstance(sid,str) or not sid: raise ConnectionError("Hub2 follow-up omitted lobby sessionId")
-            ws.send(encode_application_message(build_lobby_init(sid)))
-            try: self.wait_for(ws,{50003},20)
-            except TimeoutError: pass
-            ws.send(encode_application_message(build_tournament_subscription()))
-            self.wait_for(ws,{50018},25,True)
-            self.set(subscribed=True)
-            logger.info("iPoker tournament subscription confirmed")
+            logger.info("ChampionPoker Hub2 login accepted (31002); initializing lobby")
+            ws.send(encode_application_message(build_lobby_init(None)))
+            self.wait_for(ws,{50003},20,True)
+            logger.info("ChampionPoker lobby initialized (50003); waiting for tournament navigation/subscription")
             while not self.stop_event.is_set():
                 frame=self.recv(ws,60)
                 records,_=extract_tournaments([frame])
