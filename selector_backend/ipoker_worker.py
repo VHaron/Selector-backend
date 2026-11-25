@@ -61,7 +61,7 @@ class IPokerWorker:
         while time.monotonic()<end:
             msg=decode_application_message(self.recv(ws,max(1,end-time.monotonic())))
             if msg and msg.get("classId") in class_ids:
-                if check_error and msg.get("errorCode")!=0:
+                if check_error and str(msg.get("errorCode", 0)).strip() not in {"0", "0.0"}:
                     if 60109 in class_ids: raise AuthenticationRejected("ChampionPoker authentication rejected")
                     raise ConnectionError("Upstream rejected request")
                 return msg
