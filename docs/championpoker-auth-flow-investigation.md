@@ -95,3 +95,10 @@ The tournamentGrid union includes (among others): name, nameTranslationsList, ga
 - Bulk response observed: 1,314 records; total records across captured frames: 1,541 before deduplication.
 - Full field union from the captured records: documented above.
 - A clean server-side authentication exchange and standalone Railway WebSocket worker: not yet implemented or verified.
+
+
+### Observed field types and normalization notes
+
+In the initial 1,314-record bulk batch, startDate, originalStartDate, registrationStartDate, registrationEndDate, and lrStopTime were integer values; buyIn, fee, buyInFeeJackpotFee, guaranteedPrize, knockOutFee, and knockOutProgressionFactor were numeric; cur was a string; speedMode and lateRegistration were booleans. The HAR's tournament timestamps are integer epoch values in milliseconds (the client data shape and magnitudes indicate millisecond timestamps); normalize them to UTC ISO timestamps while preserving the original integer values. Several fields are optional and their presence differs between batches and tournament types.
+
+The presence of knockOutFee and knockOutProgressionFactor alone does not prove that a tournament is PKO. Preserve knockout metadata separately and leave progressive-format classification unknown unless the source exposes an explicit, validated format indicator.
