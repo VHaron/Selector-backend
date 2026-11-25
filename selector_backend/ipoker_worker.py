@@ -22,6 +22,10 @@ def validate_auth_message(payload: dict[str, Any]) -> None:
 def build_lobby_init(session_id: str) -> dict[str, Any]:
     return {"classId":50001,"casinoName":"championpoker","casinoShortName":None,"casinoSkin":"championpoker","clientPlatform":26,"clientType":26,"clientVersion":"26.7.1.26","oldClientVersion":None,"isFun":False,"languageCode":"EN","previewClient":False,"sessionId":session_id,"subscibeLobbyContentRequest":False,"subscribeClientServices":True}
 
+class AuthenticationRejected(Exception):
+    """Permanent upstream auth rejection; a fresh user handoff is required."""
+
+
 class IPokerWorker:
     def __init__(self, save_callback):
         self.save_callback=save_callback; self.lock=threading.RLock(); self.stop_event=threading.Event(); self.thread=None; self.auth=None
@@ -57,7 +61,9 @@ class IPokerWorker:
         while time.monotonic()<end:
             msg=decode_application_message(self.recv(ws,max(1,end-time.monotonic())))
             if msg and msg.get("classId") in class_ids:
-                if check_error and msg.get("errorCode")!=0: raise ConnectionError("Upstream rejected request")
+                if check_error and msg.get("errorCode")!=0:
+                    if 60109 in class_ids: raise AuthenticationRejected("ChampionPoker authentication rejected")
+                    raise ConnectionError("Upstream rejected request")
                 return msg
         raise TimeoutError("Expected upstream response timed out")
     def connect_once(self):
@@ -99,10 +105,14 @@ class IPokerWorker:
         try:
             while not self.stop_event.is_set():
                 try: self.connect_once()
+                except AuthenticationRejected as exc:
+                    self.set(connected=False,authenticated=False,subscribed=False,running=False,last_error=type(exc).__name__)
+                    break
                 except Exception as exc:
                     self.set(connected=False,authenticated=False,subscribed=False,last_error=type(exc).__name__)
                     if self.stop_event.wait(10): break
                     self.set(reconnects=self.status()["reconnects"]+1)
         finally:
-            self.auth=None
-            self.set(running=False,connected=False,authenticated=False,subscribed=False)
+            with self.lock:
+                self.auth=None
+                self.state.update(running=False,connected=False,authenticated=False,subscribed=False)
