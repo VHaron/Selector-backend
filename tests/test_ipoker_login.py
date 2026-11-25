@@ -23,3 +23,9 @@ def test_client_hints_is_json_object():
     hints = json.loads(_client_hints())
     assert hints["Sec-CH-UA-Platform"] == '"Android"'
     assert '"Google Chrome";v="157.0.8103.79"' in hints["Sec-CH-UA-Full-Version-List"]
+
+
+def test_captcha_required_error_code_is_distinct():
+    from selector_backend.ipoker_login import CaptchaRequired
+
+    assert issubclass(CaptchaRequired, RuntimeError)
