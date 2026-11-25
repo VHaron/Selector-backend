@@ -43,7 +43,7 @@ def test_subscription_matches_observed_50017_contract():
         "subscriptionType": 1,
         "containerType": 1,
         "filter": {
-            "value": "@game_type@ in (1, 2, 18, 6, 3, 16, 19, 13, 5, 14, 20, 21) and @start_type@=1",
+            "value": "@start_type@=1",
             "condition": None,
         },
         "fun": False,
