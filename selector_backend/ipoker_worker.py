@@ -203,9 +203,12 @@ class IPokerWorker:
                 except Exception as exc:
                     # Log only transport diagnostics; never headers, cookies, or payloads.
                     status_code = getattr(exc, "status_code", getattr(exc, "status", None))
+                    response = getattr(exc, "response", None)
+                    if status_code is None and response is not None:
+                        status_code = getattr(response, "status_code", None)
                     reason = getattr(exc, "resp", None)
                     reason = getattr(reason, "reason", None) if reason is not None else None
-                    # Never log response headers: they may contain cookies or session material.
+                    # Never log response headers or body: they may contain session material.
                     logger.warning("iPoker collector connection failed: %s status=%s reason=%s", type(exc).__name__, status_code, str(reason)[:120] if reason else None)
                     self.set(connected=False,authenticated=False,subscribed=False,last_error=type(exc).__name__)
                     if self.stop_event.wait(10): break
