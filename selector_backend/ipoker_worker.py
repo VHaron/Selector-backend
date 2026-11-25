@@ -175,6 +175,7 @@ class IPokerWorker:
                 ws.send("3" + frame[1:])
                 continue
             if frame == "41" or (isinstance(frame, str) and frame.startswith("41::")):
+                logger.warning("ChampionPoker closed the Socket.IO namespace")
                 raise ConnectionError("Socket.IO namespace disconnected")
             self._transport_frame_count += 1
             packet_prefix = frame[:2] if isinstance(frame, str) else "binary"
@@ -359,11 +360,20 @@ class IPokerWorker:
             if not message:
                 continue
             incoming_id = self._class_id(message)
-            if incoming_id not in class_ids:
-                logger.info("iPoker protocol stage received classId=%s", incoming_id)
-                continue
             error_code = message.get("errorCode", 0)
+            logger.info(
+                "iPoker protocol response: classId=%s errorCode=%s",
+                incoming_id,
+                str(error_code)[:24],
+            )
+            if incoming_id not in class_ids:
+                continue
             if check_error and str(error_code).strip() not in {"0", "0.0", "None"}:
+                logger.warning(
+                    "iPoker protocol request rejected: expected=%s response=%s",
+                    ",".join(str(value) for value in sorted(class_ids)),
+                    str(error_code)[:24],
+                )
                 if 60109 in class_ids:
                     raise AuthenticationRejected("ChampionPoker PokerLoginRequest was rejected")
                 raise ConnectionError(f"Upstream rejected classId={next(iter(class_ids))}")
