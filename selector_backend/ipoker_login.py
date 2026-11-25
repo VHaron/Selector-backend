@@ -87,12 +87,6 @@ def login_and_get_temp_token() -> dict[str, Any]:
         "realMode": os.getenv("IPOKER_REAL_MODE", "1"),
         "serviceType": os.getenv("IPOKER_SERVICE_TYPE", "GamePlay"),
         "systemId": os.getenv("IPOKER_SYSTEM_ID", "5"),
-        "clientType": "casino",
-        "clientPlatform": os.getenv("IPOKER_CLIENT_PLATFORM", "mobile"),
-        "clientVersion": os.getenv("IPOKER_CLIENT_VERSION", "26.7.1.26"),
-        "clientSkin": CASINO,
-        "languageCode": os.getenv("IPOKER_LANGUAGE_CODE", "EN"),
-        "errorLevel": "1",
     }
     url = f"{LOGIN_BASE}/LoginAndGetTempToken.php?{urlencode(query)}"
 
