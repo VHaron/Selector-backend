@@ -3,43 +3,42 @@
 Date: 2026-11-25
 Scope: isolated iPoker parser test branch only. No production changes.
 
-## Confirmed from HAR and client JavaScript
+## Confirmed from HAR and integration JavaScript
 
-- Poker client page loads `PokerRender.bundle.js` and the login integration script:
-  `https://login.championpoker.com/jswrapper/integration.js.php?casino=championpoker`.
-- The integration script exposes `iapiLoginAndGetTempToken(...)`. Its documented flow calls `LoginAndGetTempToken.php` with casino, real-mode, service type, optional system ID, and login form fields.
-- The HAR captured a different request for an already-authenticated browser session:
-  `POST https://login.championpoker.com/GetTemporaryAuthenticationToken.php`
-  with query parameters including `casinoname=championpoker`, `serviceType=GamePlay`, `systemId=18`, `realMode=1`, and client platform details.
-- Its form body included `requestType=GetTemporaryAuthenticationToken`, `userId`, `token`, `username`, and `responseType=json`.
-- The successful JSON response contains `sessionToken.sessionToken`, plus issuer system ID, creation/expiration timestamps, username, user ID, and verified redirect origin.
-- The client-side Socket.IO bootstrap message observed in DevTools uses `classId:60108` and fields `usernameOrNickname`, `tempToken`, client version/platform, and device metadata.
-- The next server message uses `classId:60109` and returns the authenticated poker `token`, `sessionId`, currency, and `errorCode:0`.
+- Client loads `https://login.championpoker.com/jswrapper/integration.js.php?casino=championpoker`.
+- Integration configuration identifies casino `championpoker`, service type `GamePlay`, default system ID `5`, mobile client platform.
+- Public function `iapiLoginAndGetTempToken(user, pass, realMode, language, systemId, serviceType, rememberMeLogin, inheritance)` constructs a request to `LoginAndGetTempToken.php`.
+- For the standard username/password login type, it submits `username`, `password`, and `loginType`; it can also include challenge-response and device/risk fields such as iovation blackbox. Other login modes include nickname/password, email/password, external token, and session token.
+- The integration script also contains `iapiLoginExternalTokenAndGetTempToken` and email-login variants.
+- A separate request seen in the HAR, `POST GetTemporaryAuthenticationToken.php`, was for an already-authenticated browser session. It required existing web-session `userId` and `token`; this is not the initial login operation.
+- The WebSocket bootstrap observed in DevTools uses message `classId:60108` with `usernameOrNickname` and `tempToken`. The response `classId:60109` contains the poker session token, session ID, currency, and error code.
 
-## Interpretation
+## What this establishes
 
-The likely bridge is that the temporary session token returned by the login integration is passed to the poker WebSocket login as `tempToken`. This is strongly suggested by the matching flow and field names, but the HAR's WebSocket frames are not included, so the exact value-to-value mapping has not yet been independently verified in one capture.
+The integration script exposes a first-party username/password-to-temporary-token login flow. This is a plausible path for a backend worker to obtain a fresh temporary token without copying browser cookies. However, the HAR did not capture a fresh `LoginAndGetTempToken.php` exchange, its exact response shape, challenge/MFA behavior, or the exact mapping between returned token fields and WebSocket `tempToken`. These must be validated before implementation.
 
-Crucially, the HAR's `GetTemporaryAuthenticationToken.php` request already had an authenticated web-session `userId` and `token`. It does **not** show how those values were initially obtained. Therefore the current evidence does not establish that a clean Railway worker can authenticate without first completing the ChampionPoker website login flow.
+The default integration configuration says system ID 5, while the authenticated-session HAR request used system ID 18. Do not hardcode either value without confirming which is correct for the ChampionPoker real-money GamePlay login.
+
+## Safe next implementation sequence
+
+1. In an isolated test only, inspect the integration's `iapiAddClientHintsAndContinue` and callback handling to document headers, form encoding, client hints, response parsing, and error mapping.
+2. Determine whether the first-party login endpoint can be called directly with username/password and what it returns. Do not run repeated password guesses or bypass CAPTCHA, device checks, MFA, or anti-bot challenges.
+3. If the endpoint requires a challenge or interactive MFA, stop and design a supported user-assisted authorization step; do not attempt to defeat it.
+4. Once a clean login exchange is verified, implement a separate backend auth module that keeps credentials in Railway secrets, requests a short-lived temp token, and redacts all secrets from logs.
+5. Then implement the Socket.IO login using the fresh temp token, validate successful `60109`, and subscribe to tournament data.
+6. Add token expiry/refresh, reconnect/backoff, and health reporting. Only then enable a scheduled worker in the isolated Railway environment.
 
 ## Security
 
-- Never commit or log `userId`, web-session `token`, `tempToken`, poker session `token`, cookies, or raw HAR request/response bodies.
-- Previously pasted tokens must be treated as exposed and revoked by logging out / logging in again.
-- Any future collector must keep credentials and short-lived tokens in Railway secrets, redact them from logs, and use the user's own authorized account only.
-
-## Next engineering steps
-
-1. Inspect the login integration's exact `LoginAndGetTempToken.php` request construction and callback/response handling.
-2. Determine whether a supported username/password or external-token login can be initiated server-side, including MFA/challenge handling, without reusing browser cookies.
-3. Only after that, implement a separate authenticated session bootstrap module. Keep it independent from the WebSocket tournament parser.
-4. Connect to `wss://schannel.ipoker.com/socket.io/?EIO=3&transport=websocket`, perform Engine.IO/Socket.IO handshake, send the 60108 login message using a fresh temporary token, require a successful 60109 response, then subscribe to tournament filters.
-5. Do not enable a scheduled Railway worker until authentication, token refresh/expiry, reconnection, and redaction are tested in the isolated environment.
+- Never commit or log credentials, `userId`, web-session tokens, `tempToken`, poker session tokens, cookies, or raw HAR bodies.
+- Tokens previously pasted into chat must be considered exposed and revoked by ending that session.
+- Use only the user's own authorized account. Do not reuse browser cookies or impersonate a different client.
+- Do not deploy any of this to production without explicit approval.
 
 ## Current status
 
 - WebSocket endpoint and Engine.IO v3 handshake: confirmed.
 - Poker WebSocket login message structure: confirmed.
-- Temporary-token issuance endpoint and its authenticated-session inputs: confirmed from HAR.
-- How the browser initially obtains the web-session `userId` and `token`: unresolved.
-- Fully unattended server-side login: not yet proven.
+- First-party integration function for username/password login and temporary-token request construction: confirmed from downloaded client JS.
+- Exact login endpoint response and MFA/challenge requirements: not yet verified.
+- Fully unattended Railway login: not yet proven.
