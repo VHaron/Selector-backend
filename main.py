@@ -9,6 +9,7 @@ from selector_backend.auth import router as auth_router
 from selector_backend.profile import router as profile_router
 from selector_backend.tournaments import router as tournaments_router
 from selector_backend.smart_grid_api import router as smart_grid_router
+from selector_backend.ipoker_catalog import router as ipoker_catalog_router
 
 # Keep Telegram credentials in Railway environment variables.
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -28,7 +29,7 @@ app.add_middleware(
     allow_origins=[origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",") if origin.strip()],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-Parser-Admin-Token"],
 )
 
 @app.get("/health")
@@ -39,6 +40,7 @@ app.include_router(auth_router)
 app.include_router(profile_router)
 app.include_router(tournaments_router)
 app.include_router(smart_grid_router)
+app.include_router(ipoker_catalog_router)
 
 if __name__ == "__main__":
     if bot:
