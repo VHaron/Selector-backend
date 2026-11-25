@@ -51,7 +51,7 @@ def _find_temp_token(value: Any) -> str | None:
                 return _find_temp_token(json.loads(text))
             except (ValueError, TypeError):
                 pass
-        match = re.search(r'["\'](?:tempToken|temporaryToken|authenticationToken)["\']\\s*:\\s*["\']([^"\']+)["\']', text, re.I)
+        match = re.search(r"""["'](?:tempToken|temporaryToken|authenticationToken)["']\s*:\s*["']([^"']+)["']""", text, re.I)
         if match:
             return match.group(1)
     return None
@@ -115,7 +115,7 @@ def login_and_get_temp_token() -> dict[str, Any]:
     except ValueError:
         # The browser integration can receive a postMessage wrapper/HTML document.
         # Extract only JSON objects; never expose or log the response body.
-        for candidate in re.findall(r'\\{[^{}]{1,20000}\\}', body):
+        for candidate in re.findall(r'\{[^{}]{1,20000}\}', body):
             try:
                 parsed = json.loads(candidate)
                 if _find_temp_token(parsed):
@@ -150,7 +150,7 @@ def build_auth_message(login: dict[str, Any]) -> dict[str, Any]:
         "tempToken": str(login["temp_token"]),
         "usernameOrNickname": username,
         "usernameLogin": True,
-        "loginType": int(os.getenv("IPOKER_LOGIN_TYPE", "1")),
+        "loginType": os.getenv("IPOKER_LOGIN_TYPE", "password"),
         "realMode": bool(login["real_mode"]),
         "casinoName": CASINO,
         "clientPlatform": int(os.getenv("IPOKER_CLIENT_PLATFORM_ID", "26")),
