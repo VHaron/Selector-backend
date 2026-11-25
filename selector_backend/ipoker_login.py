@@ -6,6 +6,7 @@ response bodies. The request shape mirrors the successful browser request.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -19,6 +20,7 @@ LOGIN_BASE = "https://login.championpoker.com"
 CASINO = "championpoker"
 SITE_ORIGIN = "https://games.championpoker.com"
 TIMEOUT = (8, 25)
+logger = logging.getLogger("ipoker.login")
 
 
 class LoginProtocolError(RuntimeError):
@@ -198,6 +200,19 @@ def login_and_get_temp_token() -> dict[str, Any]:
         raise LoginProtocolError(f"Login transport failed: {type(exc).__name__}") from None
 
     parsed = _parse_response(response)
+    safe_keys = sorted(str(key) for key in parsed.keys())[:40] if isinstance(parsed, dict) else []
+    safe_error_code = parsed.get("errorCode") if isinstance(parsed, dict) else None
+    safe_message_id = parsed.get("messageId") if isinstance(parsed, dict) else None
+    logger.info(
+        "ChampionPoker login response: http=%s content_type=%s bytes=%s json_object=%s keys=%s error_code=%s message_id=%s",
+        response.status_code,
+        response.headers.get("Content-Type", "")[:80],
+        len(response.content),
+        isinstance(parsed, dict),
+        safe_keys,
+        str(safe_error_code)[:24],
+        str(safe_message_id)[:48],
+    )
     if not response.ok:
         raise LoginProtocolError(f"Login HTTP status {response.status_code}")
 
