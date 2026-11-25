@@ -129,7 +129,7 @@ class IPokerWorker:
             logger.info("iPoker Engine.IO v3 connected; sending browser initialization and Hub2 auth")
             self._send_initial_client_messages(ws)
             ws.send(encode_application_message(self.auth))
-            auth=self.wait_for(ws,{31002},30,True)
+            auth=self.wait_for(ws,{31002,31009},30,True)
             self.set(authenticated=True)
             # The browser trace proceeds from 31002 to lobby initialization;
             # it does not wait for a 31009 response.
@@ -140,7 +140,10 @@ class IPokerWorker:
             logger.info("ChampionPoker Hub2 login accepted (31002); initializing lobby")
             ws.send(encode_application_message(build_lobby_init(None)))
             self.wait_for(ws,{50003},20,True)
-            logger.info("ChampionPoker lobby initialized (50003); waiting for tournament navigation/subscription")
+            logger.info("ChampionPoker lobby initialized (50003); requesting lobby tournament data")
+            # Captured browser flow sends classId 60005 after 50003; server replies 60006.
+            ws.send(encode_application_message({"classId": 60005}))
+            self.set(subscribed=True)
             while not self.stop_event.is_set():
                 frame=self.recv(ws,60)
                 records,_=extract_tournaments([frame])
