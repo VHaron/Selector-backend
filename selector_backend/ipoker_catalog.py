@@ -257,67 +257,53 @@ class RawCaptureBatch(BaseModel):
     frames: list[dict[str, Any]] = Field(min_length=1, max_length=500)
 
 
-CAPTURE_FILE = get_db_path("ipoker_ws_capture_db.json")
-MAX_CAPTURE_FRAMES = 20000
-
-
 @router.post("/api/admin/ipoker/capture")
 def ingest_ipoker_capture(payload: RawCaptureBatch, x_parser_admin_token: str | None = Header(default=None)):
-    """Receive live frames from the administrator's logged-in browser; never from players."""
+    """Accept only server-to-browser WebSocket frames; never store raw frames or auth material."""
     _require_admin(x_parser_admin_token)
-    capture = load_json_db(CAPTURE_FILE)
-    frames = capture.get("frames", []) if isinstance(capture, dict) else []
-    accepted = []
+    received_payloads = []
+    accepted = 0
+    ignored_outgoing = 0
     for frame in payload.frames:
-        direction = str(frame.get("direction", "unknown"))[:16]
+        direction = str(frame.get("direction", "")).lower()
+        if direction not in {"received", "in", "server"}:
+            ignored_outgoing += 1
+            continue
         data = frame.get("data")
-        if not isinstance(data, (str, dict, list, int, float, bool)) and data is not None:
+        if data is None:
             continue
-        encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
-        if len(encoded) > 8_000_000:
-            continue
-        accepted.append({"captured_at": str(frame.get("captured_at") or _utc_now()), "direction": direction,
-                         "kind": str(frame.get("kind", "message"))[:32], "url": str(frame.get("url", ""))[:1000], "data": data})
-    if not accepted:
-        raise HTTPException(status_code=422, detail="Нет допустимых WebSocket frames")
-    frames.extend(accepted)
-    frames = frames[-MAX_CAPTURE_FRAMES:]
-    store = {"source": "ChampionPoker iPoker WebSocket", "updated_at": _utc_now(), "count": len(frames), "frames": frames}
-    save_json_db(CAPTURE_FILE, store)
+        received_payloads.append(data)
+        accepted += 1
 
-    # Refresh the shared catalog as soon as the logged-in browser delivers a
-    # complete tournament-list message. Ignore sent frames and unrelated WS
-    # traffic; the collector never needs cookies, passwords, or auth headers.
-    received_payloads = [
-        frame.get("data") for frame in accepted
-        if str(frame.get("direction", "")).lower() in {"received", "in", "server"}
-    ]
+    if not accepted:
+        raise HTTPException(status_code=422, detail="Пакет не содержит входящих WebSocket frames")
+
     tournaments, decode_report = extract_tournaments(received_payloads)
     catalog_result = None
     if tournaments:
-        catalog_result = _merge_tournaments(tournaments, _utc_now(), "0.3.0-live-capture")
+        catalog_result = _merge_tournaments(tournaments, _utc_now(), "0.4.0-live-capture")
 
+    # Deliberately persist only aggregate diagnostics. Raw Socket.IO frames can
+    # contain session identifiers and are never written to disk or returned.
     return {
         "status": "captured",
-        "accepted": len(accepted),
-        "total": len(frames),
-        "updated_at": store["updated_at"],
+        "accepted_incoming": accepted,
+        "ignored_outgoing": ignored_outgoing,
         "catalog": catalog_result,
         "decode": decode_report,
+        "received_at": _utc_now(),
     }
 
 
 @router.get("/api/admin/ipoker/capture/status")
 def get_ipoker_capture_status(x_parser_admin_token: str | None = Header(default=None)):
     _require_admin(x_parser_admin_token)
-    capture = load_json_db(CAPTURE_FILE)
-    frames = capture.get("frames", []) if isinstance(capture, dict) else []
-    by_direction: dict[str, int] = {}
-    for frame in frames:
-        direction = str(frame.get("direction", "unknown"))
-        by_direction[direction] = by_direction.get(direction, 0) + 1
-    return {"count": len(frames), "updated_at": capture.get("updated_at") if isinstance(capture, dict) else None,
-            "by_direction": by_direction, "source": "ChampionPoker iPoker WebSocket"}
+    store = _read_store()
+    return {
+        "catalog_count": len(store.get("tournaments", [])),
+        "catalog_updated_at": store.get("updated_at"),
+        "source": "ChampionPoker iPoker live capture",
+    }
 
 
 # Assisted WebSocket worker controls. Runtime auth material is never persisted or returned.
