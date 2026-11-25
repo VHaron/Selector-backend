@@ -1,13 +1,15 @@
 """Assisted in-memory ChampionPoker Socket.IO collector. Never persists auth material."""
 from __future__ import annotations
-import json, logging, threading, time
+import json, logging, threading, time, uuid
 from datetime import datetime, timezone
 from typing import Any
 import websocket
+import requests
 from .ipoker_socketio import build_tournament_subscription, decode_application_message, encode_application_message, extract_tournaments
 
-WS_URL = "wss://schannel.ipoker.com/socket.io/?EIO=3&transport=websocket"
-ORIGIN = "https://games.championpoker.com"
+HANDSHAKE_URL = "https://oapi-cur.techonlinecorp.com/socket.io/1/"
+WS_BASE_URL = "wss://oapi-cur.techonlinecorp.com/socket.io/1/websocket/"
+ORIGIN = "https://www.championpoker.com"
 logger = logging.getLogger("ipoker.worker")
 REQUIRED_AUTH_FIELDS = {"ID","responses","sessionToken","userName","casinoName","clientType","deliveryPlatform","correlationId"}
 
@@ -75,31 +77,64 @@ class IPokerWorker:
                     raise ConnectionError("Upstream rejected request")
                 return msg
         raise TimeoutError("Expected upstream response timed out")
+    def _open_socketio09(self):
+        user_agent = str(self.auth.get("userAgent", "Mozilla/5.0"))
+        headers = {"Origin": ORIGIN, "Referer": ORIGIN + "/", "User-Agent": user_agent}
+        if self.cookie_header:
+            headers["Cookie"] = self.cookie_header
+        response = requests.get(HANDSHAKE_URL, params={"t": str(int(time.time() * 1000))},
+                                headers=headers, timeout=(8, 15))
+        if not response.ok:
+            raise ConnectionError("Socket.IO 0.9 handshake HTTP failure")
+        parts = response.text.strip().split(":")
+        if len(parts) < 4 or not parts[0] or "websocket" not in parts[3].split(","):
+            raise ConnectionError("Socket.IO 0.9 handshake response is invalid")
+        socket_id = parts[0]
+        ws_url = WS_BASE_URL + socket_id
+        ws = websocket.create_connection(ws_url, timeout=3, origin=ORIGIN,
+                                         cookie=self.cookie_header,
+                                         header=["User-Agent: " + user_agent,
+                                                 "Referer: " + ORIGIN + "/"],
+                                         enable_multithread=True)
+        return ws
+
+    def _send_initial_client_messages(self, ws):
+        # These two requests are sent by the browser before Hub2 login.
+        country_correlation = "correlationId_" + str(uuid.uuid4())
+        ip_correlation = "correlationId_" + str(uuid.uuid4())
+        ws.send(encode_application_message({
+            "ID": 35685, "casino": "championpoker",
+            "description": "Country by Geo IP detection",
+            "responses": [35686, 35687], "errorLevel": 1,
+            "relativeURI": "/poker", "correlationId": country_correlation,
+        }))
+        ws.send(encode_application_message({
+            "ID": 81405, "description": "IP address detection",
+            "responses": [81406, 81407], "errorLevel": 1,
+            "relativeURI": "/poker", "correlationId": ip_correlation,
+        }))
+
     def connect_once(self):
-        logger.info("iPoker WebSocket connecting")
-        ws=websocket.create_connection(WS_URL,timeout=2,origin=ORIGIN,cookie=self.cookie_header,header=["User-Agent: "+str(self.auth.get("userAgent","Mozilla/5.0"))],enable_multithread=True)
+        logger.info("iPoker Socket.IO 0.9 handshake starting")
+        ws = self._open_socketio09()
         try:
-            hello=self.recv(ws,20)
-            if not hello.startswith("0"): raise ConnectionError("Invalid Engine.IO handshake")
-            json.loads(hello[1:])
-            ws.send("40")
-            end=time.monotonic()+15
-            while time.monotonic()<end:
-                frame=self.recv(ws,max(1,end-time.monotonic()))
-                if frame.startswith("40"): break
-                if frame.startswith("44"): raise ConnectionError("Socket.IO namespace rejected")
-            else: raise TimeoutError("Namespace handshake timeout")
             self.set(connected=True,last_error=None)
-            logger.info("iPoker WebSocket namespace connected; sending auth")
+            logger.info("iPoker Socket.IO 0.9 connected; sending browser initialization and Hub2 auth")
+            self._send_initial_client_messages(ws)
             ws.send(encode_application_message(self.auth))
-            auth=self.wait_for(ws,{31002},25,True)
+            auth=self.wait_for(ws,{31002},30,True)
             self.set(authenticated=True)
+            # The server returns a refreshed session token in 31002. Keep it
+            # in memory only; the following 31009 response completes login.
+            auth_data = auth.get("data") if isinstance(auth.get("data"), dict) else {}
+            refreshed_token = auth_data.get("sessionToken")
+            if refreshed_token:
+                self.auth["sessionToken"] = str(refreshed_token)
             logger.info("ChampionPoker Hub2 login accepted (31002); awaiting follow-up 31009")
-            followup = self.wait_for(ws,{31009},20,True)
+            followup = self.wait_for(ws,{31009},25,True)
             sid = followup.get("sessionId") or (followup.get("data") or {}).get("sessionId")
             if not isinstance(sid,str) or not sid: raise ConnectionError("Hub2 follow-up omitted lobby sessionId")
             ws.send(encode_application_message(build_lobby_init(sid)))
-            # The observed skin sends 50003. 50026 may precede it.
             try: self.wait_for(ws,{50003},20)
             except TimeoutError: pass
             ws.send(encode_application_message(build_tournament_subscription()))
