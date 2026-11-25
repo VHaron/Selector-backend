@@ -233,7 +233,7 @@ def build_auth_message(login: dict[str, Any]) -> dict[str, Any]:
         "tempToken": str(login["temp_token"]),
         "usernameOrNickname": username,
         "usernameLogin": True,
-        "loginType": os.getenv("IPOKER_LOGIN_TYPE", "password"),
+        "loginType": int(os.getenv("IPOKER_LOGIN_TYPE", "1")),
         "realMode": bool(login["real_mode"]),
         "casinoName": CASINO,
         "clientPlatform": int(os.getenv("IPOKER_CLIENT_PLATFORM_ID", "26")),
