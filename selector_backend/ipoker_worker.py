@@ -92,8 +92,31 @@ class IPokerWorker:
             session.headers["Cookie"] = self.cookie_header
         poll_url = WS_URL.replace("wss://", "https://").replace("ws://", "http://")
         poll_url += "?EIO=3&transport=polling&t=" + str(int(time.time() * 1000))
-        response = session.get(poll_url, timeout=12)
-        response.raise_for_status()
+        try:
+            response = session.get(poll_url, timeout=12)
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            # Browser captures also show the legacy Socket.IO handshake route.
+            status = getattr(exc.response, "status_code", None)
+            if status != 400:
+                raise
+            logger.warning("Engine.IO polling rejected; testing captured legacy handshake route")
+            legacy_url = WS_URL.replace("wss://", "https://").replace("ws://", "http://") + "1/"
+            legacy = session.get(legacy_url, params={"t": str(int(time.time() * 1000))}, timeout=12)
+            legacy.raise_for_status()
+            parts = legacy.text.strip().split(":")
+            if len(parts) < 4 or not parts[0] or "websocket" not in parts[3].split(","):
+                raise ConnectionError("Legacy Socket.IO handshake response was invalid")
+            sid = parts[0]
+            legacy_ws_url = WS_URL + "1/websocket/" + sid
+            ws = websocket.create_connection(
+                legacy_ws_url, timeout=10,
+                header=["Origin: " + ORIGIN, "Referer: " + ORIGIN + "/poker",
+                        "User-Agent: " + user_agent],
+                cookie=self.cookie_header, enable_multithread=True,
+            )
+            logger.info("Captured legacy handshake accepted; WebSocket established")
+            return ws
         opening = response.text
         if not isinstance(opening, str) or not opening.startswith("0"):
             raise ConnectionError("Engine.IO v3 polling opening packet was not received")
