@@ -36,6 +36,8 @@ def _find_temp_token(value: Any) -> str | None:
     """Accept both legacy tempToken replies and the current nested sessionToken reply."""
     if isinstance(value, dict):
         session = value.get("sessionToken")
+        if isinstance(session, (str, int)) and str(session).strip():
+            return str(session)
         if isinstance(session, dict):
             token = session.get("sessionToken")
             if isinstance(token, (str, int)) and str(token).strip():
