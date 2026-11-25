@@ -30,3 +30,31 @@ def test_native_championpoker_tournament_shape():
     assert item["is_pko"] is None  # Not inferred from bounty fee alone.
     assert item["time_start"].startswith("2026-11-")
     assert item["raw"] == raw
+
+
+def test_incremental_batches_merge_instead_of_replacing_catalog(tmp_path, monkeypatch):
+    from selector_backend import ipoker_catalog
+
+    monkeypatch.setattr(ipoker_catalog, "CATALOG_FILE", str(tmp_path / "catalog.json"))
+    first = {"containerId": 1, "tournamentGrid": {"name": "First", "startDate": 1795651201000}}
+    second = {"containerId": 2, "tournamentGrid": {"name": "Second", "startDate": 1795651301000}}
+    ipoker_catalog._merge_tournaments([first], None, "test")
+    result = ipoker_catalog._merge_tournaments([second], None, "test")
+    stored = ipoker_catalog._read_store()
+
+    assert result["count"] == 2
+    assert {item["upstream_id"] for item in stored["tournaments"]} == {"1", "2"}
+
+
+def test_incremental_batch_updates_existing_tournament(tmp_path, monkeypatch):
+    from selector_backend import ipoker_catalog
+
+    monkeypatch.setattr(ipoker_catalog, "CATALOG_FILE", str(tmp_path / "catalog.json"))
+    original = {"containerId": 7, "tournamentGrid": {"name": "Old name", "startDate": 1795651201000}}
+    updated = {"containerId": 7, "tournamentGrid": {"name": "Updated name", "startDate": 1795651201000}}
+    ipoker_catalog._merge_tournaments([original], None, "test")
+    ipoker_catalog._merge_tournaments([updated], None, "test")
+    stored = ipoker_catalog._read_store()
+
+    assert len(stored["tournaments"]) == 1
+    assert stored["tournaments"][0]["name"] == "Updated name"
