@@ -172,6 +172,7 @@ class IPokerWorker:
     def _open_socketio(self):
         self.disconnect_event.clear()
         self.incoming = queue.Queue()
+        namespace_ready = threading.Event()
         sio = socketio.Client(
             reconnection=False,
             logger=False,
@@ -180,19 +181,31 @@ class IPokerWorker:
         )
         sio.on("message", self._on_message)
         sio.on("disconnect", self._on_disconnect)
-        # The actual PokerRender bundle uses Engine.IO protocol 3 and prefers
-        # direct WebSocket transport before polling. Force that same first path.
+        # python-socketio 4.6.1 returns from connect() when Engine.IO opens;
+        # unlike browser socket.io-client, it does not wait for the server's
+        # implicit root-namespace CONNECT packet. PokerRender sends 60200 only
+        # after that namespace "connect" event. Wait for it explicitly.
+        sio.on("connect", lambda: namespace_ready.set())
+        self.sio = sio
         sio.connect(
             SOCKET_URL,
             headers=self._headers(),
             transports=["websocket"],
+            namespaces=["/"],
             socketio_path="socket.io",
         )
-        self.sio = sio
-        if not sio.connected:
-            raise ConnectionError("Socket.IO namespace did not connect")
+        if not namespace_ready.wait(timeout=12):
+            try:
+                sio.disconnect()
+            except Exception:
+                pass
+            self.sio = None
+            raise ConnectionError("Timed out waiting for Socket.IO root namespace CONNECT")
+        if not sio.connected or self.disconnect_event.is_set():
+            self.sio = None
+            raise ConnectionError("Socket.IO namespace disconnected during connect")
         self.set(connected=True, last_error=None)
-        logger.info("ChampionPoker Socket.IO namespace connected using native client")
+        logger.info("ChampionPoker Socket.IO root namespace CONNECT acknowledged")
         return sio
 
     def _send(self, message):
