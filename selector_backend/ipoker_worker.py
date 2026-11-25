@@ -290,19 +290,21 @@ class IPokerWorker:
 
     def _open_engineio3(self):
         logger.info("Opening ChampionPoker Socket.IO: websocket transport first")
+        direct_error_name = "unknown"
         try:
             return self._open_engineio3_direct()
         except Exception as direct_error:
+            direct_error_name = type(direct_error).__name__
             logger.warning(
                 "Direct iPoker websocket attempt failed: %s; trying Engine.IO polling fallback",
-                type(direct_error).__name__,
+                direct_error_name,
             )
         try:
             return self._open_engineio3_polling()
         except Exception as polling_error:
             raise ConnectionError(
                 "Both Engine.IO transports failed "
-                f"(websocket={type(direct_error).__name__}, polling={type(polling_error).__name__})"
+                f"(websocket={direct_error_name}, polling={type(polling_error).__name__})"
             ) from None
 
     @staticmethod
