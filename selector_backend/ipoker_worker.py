@@ -29,17 +29,17 @@ class AuthenticationRejected(Exception):
 
 class IPokerWorker:
     def __init__(self, save_callback):
-        self.save_callback=save_callback; self.lock=threading.RLock(); self.stop_event=threading.Event(); self.thread=None; self.auth=None
+        self.save_callback=save_callback; self.lock=threading.RLock(); self.stop_event=threading.Event(); self.thread=None; self.auth=None; self.cookie_header=None
         self.state={"running":False,"connected":False,"authenticated":False,"subscribed":False,"last_message_at":None,"last_catalog_at":None,"catalog_count":0,"last_error":None,"reconnects":0}
     def status(self):
         with self.lock: return dict(self.state)
     def set(self, **kw):
         with self.lock: self.state.update(kw)
-    def start(self, auth):
+    def start(self, auth, cookie_header=None):
         validate_auth_message(auth)
         with self.lock:
             if self.thread and self.thread.is_alive(): raise RuntimeError("Collector is already running")
-            self.auth=dict(auth); self.stop_event.clear(); self.set(running=True,connected=False,authenticated=False,subscribed=False,last_error=None)
+            self.auth=dict(auth); self.cookie_header=cookie_header; self.stop_event.clear(); self.set(running=True,connected=False,authenticated=False,subscribed=False,last_error=None)
             self.thread=threading.Thread(target=self.run,daemon=True,name="ipoker-ws-collector"); self.thread.start()
         return {"status":"starting"}
     def stop(self):
@@ -78,7 +78,7 @@ class IPokerWorker:
         raise TimeoutError("Expected upstream response timed out")
     def connect_once(self):
         logger.info("iPoker WebSocket connecting")
-        ws=websocket.create_connection(WS_URL,timeout=2,origin=ORIGIN,enable_multithread=True)
+        ws=websocket.create_connection(WS_URL,timeout=2,origin=ORIGIN,cookie=self.cookie_header,header=["User-Agent: "+str(self.auth.get("userAgent","Mozilla/5.0"))],enable_multithread=True)
         try:
             hello=self.recv(ws,20)
             if not hello.startswith("0"): raise ConnectionError("Invalid Engine.IO handshake")
@@ -132,4 +132,5 @@ class IPokerWorker:
         finally:
             with self.lock:
                 self.auth=None
+                self.cookie_header=None
                 self.state.update(running=False,connected=False,authenticated=False,subscribed=False)
