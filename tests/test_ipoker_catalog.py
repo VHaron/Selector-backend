@@ -9,12 +9,15 @@ def test_native_championpoker_tournament_shape():
             "cur": "EUR",
             "buyIn": 5.68,
             "fee": 1.12,
+            "buyInFeeJackpotFee": 6.8,
             "startDate": 1795651201000,
             "knockOutFee": 5.7,
+            "knockOutProgressionFactor": 0.5,
             "gameType": 1,
             "status": 1,
             "guaranteedPrize": 1000,
             "tableSize": 8,
+            "speedMode": False,
         },
     }
     item = normalize_tournament(raw)
@@ -23,6 +26,7 @@ def test_native_championpoker_tournament_shape():
     assert item["fee"] == 1.12
     assert item["total_buyin"] == 6.8
     assert item["currency"] == "EUR"
-    assert item["is_pko"] is True
+    assert item["is_knockout"] is True
+    assert item["is_pko"] is None  # Not inferred from bounty fee alone.
     assert item["time_start"].startswith("2026-11-")
     assert item["raw"] == raw
