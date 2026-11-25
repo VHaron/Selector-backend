@@ -11,13 +11,13 @@ import re
 import secrets
 import uuid
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import requests
 
 LOGIN_BASE = "https://login.championpoker.com"
 CASINO = "championpoker"
-SITE_ORIGIN = "https://www.championpoker.com"
+SITE_ORIGIN = "https://games.championpoker.com"
 TIMEOUT = (8, 25)
 
 
@@ -116,35 +116,44 @@ def _parse_response(response: requests.Response) -> Any:
     return None
 
 
+def _encode_form_value(value: Any) -> str:
+    """PAS setup page applies encodeURIComponent before appending FormData."""
+    return quote(str(value), safe="-_.!~*'()")
+
+
 def login_and_get_temp_token() -> dict[str, Any]:
-    """Perform the browser-shaped login and return a sanitized ephemeral auth result."""
+    """Reproduce the integration.js + pasSetupPage browser login flow."""
     username = _required_env("IPOKER_ADMIN_USERNAME")
     password = _required_env("IPOKER_ADMIN_PASSWORD")
     real_mode = os.getenv("IPOKER_REAL_MODE", "1")
-    device_id = os.getenv("IPOKER_DEVICE_ID", str(uuid.uuid4()))
-    request_id = str(secrets.randbelow(9_000_000_000_000) + 1_000_000_000_000)
-
-    session = requests.Session()
+    request_id = f"{int(__import__('time').time() * 1000)}x{secrets.randbelow(1_000_000)}"
     user_agent = os.getenv(
         "IPOKER_USER_AGENT",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Linux; Android 16; Pixel 10) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/157.0.0.0 Mobile Safari/537.36",
     )
+
+    session = requests.Session()
     session.headers.update({
         "User-Agent": user_agent,
-        "Origin": LOGIN_BASE,
-        "Referer": f"{SITE_ORIGIN}/",
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": os.getenv("IPOKER_ACCEPT_LANGUAGE", "en-US,en;q=0.9"),
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     })
 
     try:
-        # Match the browser's pre-auth configuration request and retain its cookies.
+        pas = session.get(
+            f"{LOGIN_BASE}/pasSetupPage.php",
+            params={"casino": CASINO},
+            headers={"Referer": f"{SITE_ORIGIN}/"},
+            timeout=TIMEOUT,
+        )
+        if not pas.ok:
+            raise LoginProtocolError(f"PAS setup HTTP status {pas.status_code}")
+
         preauth = session.get(
             f"{LOGIN_BASE}/PreAuthConf",
             params={"casino": CASINO},
-            headers={"Accept": "application/json, text/plain, */*"},
+            headers={"Referer": f"{SITE_ORIGIN}/"},
             timeout=TIMEOUT,
         )
         if not preauth.ok:
@@ -156,37 +165,45 @@ def login_and_get_temp_token() -> dict[str, Any]:
         if isinstance(preauth_config, dict) and preauth_config.get("enforceCaptcha") is True:
             raise LoginProtocolError("ChampionPoker requires CAPTCHA; automatic login cannot continue")
 
+        # Values from iapiConf in the captured integration.js.php.
         query = {
             "casinoname": CASINO,
             "realMode": real_mode,
-            "serviceType": os.getenv("IPOKER_SERVICE_TYPE", "GamePlay"),
+            "serviceType": "GamePlay",
+            "systemId": os.getenv("IPOKER_SYSTEM_ID", "5"),
             "clientType": "casino",
-            "clientPlatform": "web",
+            "clientPlatform": "mobile",
             "clientSkin": CASINO,
-            "deviceId": device_id,
-            "deliveryPlatform": os.getenv("IPOKER_DELIVERY_PLATFORM", "Hub2"),
-            "languageCode": os.getenv("IPOKER_LANGUAGE_CODE", "en").lower(),
-            "redirectUrl": f"{SITE_ORIGIN}/#?requestId={request_id}",
+            "deliveryPlatform": os.getenv("IPOKER_DELIVERY_PLATFORM", "html5"),
+            "redirectUrl": f"{SITE_ORIGIN}/#requestId={request_id}",
             "errorLevel": "1",
-            "messagesSupported": "1",
         }
-        form = {
-            "eventOrigin": LOGIN_BASE,
+        fields = {
+            "eventOrigin": SITE_ORIGIN,
             "hr": f"{SITE_ORIGIN}/",
             "requestType": "LoginAndGetTempToken",
             "username": username,
             "password": password,
             "loginType": "password",
-            "clientHints": _client_hints(),
         }
+        configured_hints = os.getenv("IPOKER_CLIENT_HINTS_JSON", "").strip()
+        if configured_hints:
+            try:
+                hints = json.loads(configured_hints)
+                if isinstance(hints, dict):
+                    fields["clientHints"] = json.dumps(hints, separators=(",", ":"))
+            except ValueError:
+                pass
+
+        multipart = [(key, (None, _encode_form_value(value))) for key, value in fields.items()]
+        multipart.append(("responseType", (None, "json")))
         response = session.post(
             f"{LOGIN_BASE}/LoginAndGetTempToken.php",
             params=query,
-            data=form,
+            files=multipart,
             headers={
                 "Origin": LOGIN_BASE,
-                "Referer": f"{LOGIN_BASE}/",
-                "X-Requested-With": "XMLHttpRequest",
+                "Referer": f"{LOGIN_BASE}/pasSetupPage.php?casino={CASINO}",
             },
             timeout=TIMEOUT,
             allow_redirects=True,
@@ -198,7 +215,6 @@ def login_and_get_temp_token() -> dict[str, Any]:
 
     parsed = _parse_response(response)
     if not response.ok:
-        # Do not include upstream body: it may contain credentials or session material.
         raise LoginProtocolError(f"Login HTTP status {response.status_code}")
 
     if isinstance(parsed, dict):
@@ -209,7 +225,6 @@ def login_and_get_temp_token() -> dict[str, Any]:
             raise LoginProtocolError("ChampionPoker returned an authentication error")
     token = _find_temp_token(parsed)
     if not token:
-        # Do not leak the body; distinguish the known 2FA requirement safely.
         conf = preauth_config if isinstance(preauth_config, dict) else {}
         two_factor = conf.get("twoFactorAuthenticationConf")
         if isinstance(two_factor, dict) and two_factor.get("enabled"):
