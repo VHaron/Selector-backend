@@ -46,3 +46,35 @@ if __name__ == "__main__":
     if bot:
         threading.Thread(target=lambda: bot.infinity_polling(none_stop=True), daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
+
+# Start the shared iPoker collector automatically. The public selector only reads
+# the normalized catalogue; upstream credentials stay exclusively in Railway.
+def _start_ipoker_collector():
+    import logging
+    from selector_backend.ipoker_catalog import _worker
+    from selector_backend.ipoker_login import LoginProtocolError, build_auth_message, login_and_get_temp_token
+
+    logger = logging.getLogger("ipoker.autostart")
+    if os.getenv("IPOKER_AUTO_START", "1").strip().lower() in {"0", "false", "no", "off"}:
+        logger.info("iPoker collector auto-start is disabled")
+        return
+    if not os.getenv("IPOKER_ADMIN_USERNAME") or not os.getenv("IPOKER_ADMIN_PASSWORD"):
+        logger.warning("iPoker collector not started: Railway login variables are missing")
+        return
+    try:
+        login = login_and_get_temp_token()
+        result = _worker.start(build_auth_message(login))
+        logger.info("iPoker collector start requested: %s", result.get("status", "unknown"))
+    except LoginProtocolError as exc:
+        # LoginProtocolError messages are deliberately sanitized by the login module.
+        logger.error("iPoker collector login failed: %s", str(exc))
+    except (RuntimeError, ValueError) as exc:
+        logger.error("iPoker collector could not start: %s", type(exc).__name__)
+    except Exception as exc:
+        logger.error("iPoker collector startup failed: %s", type(exc).__name__)
+
+
+@app.on_event("startup")
+def launch_ipoker_collector_on_startup():
+    threading.Thread(target=_start_ipoker_collector, daemon=True, name="ipoker-login-autostart").start()
