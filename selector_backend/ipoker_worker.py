@@ -9,14 +9,14 @@ from .ipoker_socketio import build_tournament_subscription, decode_application_m
 WS_URL = "wss://schannel.ipoker.com/socket.io/?EIO=3&transport=websocket"
 ORIGIN = "https://games.championpoker.com"
 logger = logging.getLogger("ipoker.worker")
-REQUIRED_AUTH_FIELDS = {"classId","tempToken","usernameOrNickname","usernameLogin","loginType","realMode","casinoName","clientPlatform","clientVersion","deviceFamily","deviceName","deviceType","hardSerial","softSerial","languageCode","osVersion","platformType","supportedPokerServices","browser","userAgent"}
+REQUIRED_AUTH_FIELDS = {"ID","responses","sessionToken","userName","casinoName","clientType","deliveryPlatform","correlationId"}
 
 def validate_auth_message(payload: dict[str, Any]) -> None:
     if not isinstance(payload, dict): raise ValueError("auth_message must be a JSON object")
     missing = sorted(REQUIRED_AUTH_FIELDS - payload.keys())
     if missing: raise ValueError("Missing required auth fields: " + ", ".join(missing))
-    if payload["classId"] != 60108: raise ValueError("auth_message.classId must be 60108")
-    for key in ("tempToken","usernameOrNickname","casinoName","clientVersion"):
+    if payload["ID"] != 33036: raise ValueError("auth_message.ID must be 33036")
+    for key in ("sessionToken","userName","casinoName","clientType","deliveryPlatform","correlationId"):
         if not isinstance(payload.get(key),(str,int)) or not str(payload[key]).strip(): raise ValueError(f"auth_message.{key} must be non-empty")
     if not isinstance(payload["supportedPokerServices"],(list,dict,str)): raise ValueError("Invalid supportedPokerServices")
 
@@ -93,11 +93,12 @@ class IPokerWorker:
             self.set(connected=True,last_error=None)
             logger.info("iPoker WebSocket namespace connected; sending auth")
             ws.send(encode_application_message(self.auth))
-            auth=self.wait_for(ws,{60109},25,True)
-            sid=auth.get("sessionId")
-            if not isinstance(sid,str) or not sid: raise ConnectionError("Auth response omitted sessionId")
+            auth=self.wait_for(ws,{31002},25,True)
             self.set(authenticated=True)
-            logger.info("iPoker WebSocket authenticated")
+            logger.info("ChampionPoker Hub2 login accepted (31002); awaiting follow-up 31009")
+            followup = self.wait_for(ws,{31009},20,True)
+            sid = followup.get("sessionId") or (followup.get("data") or {}).get("sessionId")
+            if not isinstance(sid,str) or not sid: raise ConnectionError("Hub2 follow-up omitted lobby sessionId")
             ws.send(encode_application_message(build_lobby_init(sid)))
             # The observed skin sends 50003. 50026 may precede it.
             try: self.wait_for(ws,{50003},20)
