@@ -83,3 +83,28 @@ def test_catalogue_frame_classifier():
     frame = encode_application_message({"classId": 40001, "tournamentsList": []})
     assert is_tournament_catalogue_frame(frame)
     assert not is_tournament_catalogue_frame(encode_application_message({"classId": 50018}))
+
+
+def test_browser_tournament_push_40001_echoes_subscription_request():
+    item = {
+        "containerId": 9876,
+        "tournamentGrid": {
+            "nameTranslationsList": [{"lang": "EN", "value": "Example Mystery Bounty"}],
+            "originalStartDate": 1795644661000,
+        },
+    }
+    frame = encode_application_message({
+        "classId": 40001,
+        "requestId": "Lobby_FilterSubscription_7",
+        "messageSeqId": 94,
+        "tournamentsList": [item],
+    })
+    records, report = extract_tournaments([frame])
+    assert report["messages_decoded"] == 1
+    assert records == [item]
+
+
+def test_subscription_default_request_id_matches_browser_capture():
+    message = build_tournament_subscription()
+    assert message["requestId"] == "Lobby_FilterSubscription_7"
+    assert message["classId"] == 50017
