@@ -126,7 +126,7 @@ def normalize_tournament(raw: dict[str, Any]) -> dict[str, Any]:
     # embedded satellite target amounts like "1x€2".
     import re
     amount_match = re.search(
-        r"(?:^|\\|)\\s*(€|\\$|£)\\s*(\\d+(?:[.,]\\d{1,2})?)",
+        r"(?:^|\|)\s*(€|\$|£)\s*(\d+(?:[.,]\d{1,2})?)",
         display_name,
     )
     currency_symbols = {"€": "EUR", "$": "USD", "£": "GBP"}
