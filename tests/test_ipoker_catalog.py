@@ -58,3 +58,25 @@ def test_incremental_batch_updates_existing_tournament(tmp_path, monkeypatch):
 
     assert len(stored["tournaments"]) == 1
     assert stored["tournaments"][0]["name"] == "Updated name"
+
+
+
+def test_live_40001_partial_tournament_maps_original_date_and_translation():
+    from selector_backend.ipoker_catalog import normalize_tournament
+
+    raw = {
+        "containerId": 1185794881,
+        "tournamentGrid": {
+            "nameTranslationsList": [{"lang": "EN", "value": "€0.50 MYSTERY MINI SAT"}],
+            "originalStartDate": 1795644661000,
+            "knockOutFee": 0,
+            "activePlayers": 8,
+            "tagList": ["Guaranteed Tournaments", "Schedule"],
+        },
+    }
+    item = normalize_tournament(raw)
+    assert item["name"] == "€0.50 MYSTERY MINI SAT"
+    assert item["start_date_ms"] == 1795644661000
+    assert item["time_start"].startswith("2026-11-")
+    assert item["promo_tags"] == ["Guaranteed Tournaments", "Schedule"]
+    assert item["raw"] == raw
