@@ -130,8 +130,11 @@ def normalize_tournament(raw: dict[str, Any]) -> dict[str, Any]:
         display_name,
     )
     currency_symbols = {"€": "EUR", "$": "USD", "£": "GBP"}
-    if currency is None and amount_match:
-        currency = currency_symbols[amount_match.group(1)]
+    # Currency can be identified from any explicit symbol in the title, even
+    # when an embedded satellite target must not be treated as the buy-in.
+    currency_match = re.search(r"(€|\$|£)", display_name)
+    if currency is None and currency_match:
+        currency = currency_symbols[currency_match.group(1)]
     if buyin is None and amount_match:
         buyin = float(amount_match.group(2).replace(",", "."))
         buyin_source = "tournament_name_prefix"
