@@ -118,10 +118,16 @@ def normalize_tournament(raw: dict[str, Any]) -> dict[str, Any]:
     knockout_fee = _first(grid, "knockOutFee", "knockoutFee")
     progression = _first(grid, "knockOutProgressionFactor")
 
-    # iPoker's positive knockOutFee identifies bounty money, but by itself does
-    # not prove the format is progressive. Keep PKO unknown until its enum is mapped.
+    # Native 40001 batches expose knockOutProgressionFactor. A positive
+    # progression factor is the observed PKO signal; mystery bounty is separate.
+    mystery_bounty = _as_bool(_first(grid, "mysteryBountyTournament"))
     pko = _as_bool(_first(grid, "isPko", "isPKO", "progressiveKnockout"))
     is_knockout = isinstance(knockout_fee, (int, float)) and knockout_fee > 0
+    if pko is None:
+        if isinstance(progression, (int, float)) and progression > 0 and mystery_bounty is not True:
+            pko = True
+        elif mystery_bounty is True or not is_knockout:
+            pko = False
 
     return {
         "id": f"ipoker_{upstream_id}",
@@ -160,7 +166,7 @@ def normalize_tournament(raw: dict[str, Any]) -> dict[str, Any]:
         "is_knockout": is_knockout,
         "knockout_fee": knockout_fee,
         "knockout_progression_factor": progression,
-        "is_mystery_bounty": _first(grid, "mysteryBountyTournament"),
+        "is_mystery_bounty": mystery_bounty,
         "is_bounty_in_tournament_money": _first(grid, "isBountyInTournamentMoney"),
         "is_battle_royale": _first(grid, "isBattleRoyale"),
         "is_satellite": _first(grid, "satellite"),
