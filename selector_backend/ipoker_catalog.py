@@ -348,6 +348,61 @@ class RawCaptureBatch(BaseModel):
     """Raw browser-observed iPoker WebSocket frames; binary payloads stay base64."""
     frames: list[dict[str, Any]] = Field(min_length=1, max_length=500)
 
+class CollectorImport(BaseModel):
+    """Sanitized browser relay records; this endpoint never accepts WebSocket/auth frames."""
+    tournaments: list[dict[str, Any]] = Field(min_length=1, max_length=500)
+    collector_version: str = "0.7.0-browser-relay"
+
+
+_COLLECTOR_GRID_FIELDS = {
+    "name", "nameTranslationsList", "originalStartDate", "startDate", "startDateTime",
+    "startTime", "buyIn", "buyin", "buy_in", "totalBuyIn", "entryFee", "fee", "rake",
+    "buyInFee", "buyInFeeJackpotFee", "cur", "currency", "currencyCode", "buyInCurrency",
+    "guaranteedPrize", "guarantee", "gtd", "prizePool", "currentPrizePool", "prizePoolLeft",
+    "maxPlayers", "registeredPlayers", "totalPlayers", "uniqueRegisteredPlayers",
+    "activePlayers", "playersRemaining", "tableSize", "maxPlayersPerTable", "seats",
+    "gameType", "betType", "status", "tournamentStatus", "colorIndex", "startType",
+    "buyInType", "prizeType", "tournamentType", "tagList", "promoTags", "knockOutFee",
+    "knockoutFee", "knockOutProgressionFactor", "mysteryBountyTournament",
+    "isBountyInTournamentMoney", "isBattleRoyale", "satellite", "shootout",
+    "isFastProgress", "speedMode", "lateRegistration", "lateRegistrationStatus",
+    "registrationStartDate", "registrationEndDate", "lrStopTime", "startStack",
+    "levelDuration", "reEntryEnabled", "multiEntryEnabled", "directRegistrationAllowed",
+    "presumableDuration", "playersNeededToStart", "delayEndTime", "unregisterNotAllowed",
+    "showLateRegTime", "finalTableSize", "currentTournamentLevel", "isBroadcast",
+    "speedGameplay",
+}
+
+
+def _sanitize_collector_tournament(raw: Any) -> dict[str, Any] | None:
+    """Server-side allowlist: discard every field not needed for tournament selection."""
+    if not isinstance(raw, dict) or raw.get("containerId") is None:
+        return None
+    grid = raw.get("tournamentGrid")
+    if not isinstance(grid, dict):
+        return None
+    clean_grid: dict[str, Any] = {}
+    for key, value in grid.items():
+        if key not in _COLLECTOR_GRID_FIELDS or value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            clean_grid[key] = value
+        elif key == "nameTranslationsList" and isinstance(value, list):
+            clean_grid[key] = [
+                {"lang": item.get("lang"), "value": item.get("value")}
+                for item in value
+                if isinstance(item, dict)
+                and isinstance(item.get("lang"), str)
+                and isinstance(item.get("value"), str)
+            ]
+        elif key in {"tagList", "promoTags"} and isinstance(value, list):
+            clean_grid[key] = [
+                item for item in value if isinstance(item, (str, int, float, bool))
+            ]
+    if not clean_grid:
+        return None
+    return {"containerId": raw["containerId"], "tournamentGrid": clean_grid}
+
 
 @router.post("/api/admin/ipoker/capture")
 def ingest_ipoker_capture(payload: RawCaptureBatch, x_parser_admin_token: str | None = Header(default=None)):
@@ -384,6 +439,30 @@ def ingest_ipoker_capture(payload: RawCaptureBatch, x_parser_admin_token: str | 
         "catalog": catalog_result,
         "decode": decode_report,
         "received_at": _utc_now(),
+    }
+
+
+@router.post("/api/collector/ipoker/ingest")
+def ingest_browser_collector(
+    payload: CollectorImport,
+    x_collector_token: str | None = Header(default=None),
+):
+    """Receive only allowlisted tournament records from the local browser relay."""
+    expected = os.getenv("IPOKER_CAPTURE_TOKEN", "")
+    if not expected or not x_collector_token or not hmac.compare_digest(x_collector_token, expected):
+        raise HTTPException(status_code=401, detail="Недействительный токен сборщика")
+    clean = [
+        item for item in (_sanitize_collector_tournament(raw) for raw in payload.tournaments)
+        if item is not None
+    ]
+    if not clean:
+        raise HTTPException(status_code=422, detail="Не найдено допустимых записей турниров")
+    result = _merge_tournaments(clean, _utc_now(), payload.collector_version)
+    return {
+        **result,
+        "accepted": len(clean),
+        "rejected": len(payload.tournaments) - len(clean),
+        "source": "ChampionPoker browser relay",
     }
 
 
