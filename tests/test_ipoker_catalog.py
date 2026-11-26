@@ -97,3 +97,38 @@ def test_mystery_bounty_is_not_classified_as_pko():
     assert item["is_knockout"] is True
     assert item["is_mystery_bounty"] is True
     assert item["is_pko"] is False
+
+
+
+def test_buyin_and_currency_recovered_only_from_unambiguous_name_prefix():
+    from selector_backend.ipoker_catalog import normalize_tournament
+
+    euro = normalize_tournament({
+        "containerId": 901,
+        "tournamentGrid": {
+            "nameTranslationsList": [{"lang": "EN", "value": "€0.50 MYSTERY MINI SAT"}],
+            "originalStartDate": 1795644661000,
+        },
+    })
+    assert euro["buyin"] == 0.5
+    assert euro["currency"] == "EUR"
+    assert euro["buyin_source"] == "tournament_name_prefix"
+
+    schedule_label = normalize_tournament({
+        "containerId": 902,
+        "tournamentGrid": {
+            "nameTranslationsList": [{"lang": "EN", "value": "E4|€12.50 MICRO MONSTER|D1"}],
+        },
+    })
+    assert schedule_label["buyin"] == 12.5
+    assert schedule_label["currency"] == "EUR"
+
+    satellite = normalize_tournament({
+        "containerId": 903,
+        "tournamentGrid": {
+            "nameTranslationsList": [{"lang": "EN", "value": "BIG DEUCE SAT 1x€2 HYPER"}],
+        },
+    })
+    assert satellite["buyin"] is None
+    assert satellite["currency"] == "EUR"
+    assert satellite["buyin_source"] is None
