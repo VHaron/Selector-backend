@@ -6,7 +6,6 @@ import logging
 import queue
 import threading
 import time
-import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -270,7 +269,7 @@ class IPokerWorker:
                 saved.get("count", len(records)),
             )
 
-    def _wait_for(self, class_ids, timeout=25, check_error=False):
+    def _wait_for(self, class_ids, timeout=25, check_error=False, request_id=None):
         deadline = time.monotonic() + timeout
         while not self.stop_event.is_set() and time.monotonic() < deadline:
             if self.sio is None or not self.sio.connected or self.disconnect_event.is_set():
@@ -285,28 +284,20 @@ class IPokerWorker:
                 continue
             incoming_id = self._class_id(message)
             error_code = message.get("errorCode", 0)
-            logger.info(
-                "iPoker protocol response: classId=%s errorCode=%s",
-                incoming_id,
-                str(error_code)[:24],
-            )
+            logger.info("iPoker protocol response: classId=%s errorCode=%s", incoming_id, str(error_code)[:24])
             self._process_message(message)
             if incoming_id not in class_ids:
                 continue
+            if request_id is not None and message.get("requestId") != request_id:
+                logger.info("iPoker ignored response with non-matching subscription requestId")
+                continue
             if check_error and str(error_code).strip() not in {"0", "0.0", "None"}:
-                logger.warning(
-                    "iPoker protocol request rejected: expected=%s response=%s",
-                    ",".join(str(value) for value in sorted(class_ids)),
-                    str(error_code)[:24],
-                )
+                logger.warning("iPoker protocol request rejected: expected=%s response=%s", ",".join(str(value) for value in sorted(class_ids)), str(error_code)[:24])
                 if 60109 in class_ids:
                     raise AuthenticationRejected("ChampionPoker PokerLoginRequest was rejected")
                 raise ConnectionError(f"Upstream rejected classId={next(iter(class_ids))}")
             return message
-        raise TimeoutError(
-            "Timed out waiting for upstream classId="
-            + ",".join(str(value) for value in sorted(class_ids))
-        )
+        raise TimeoutError("Timed out waiting for upstream classId=" + ",".join(str(value) for value in sorted(class_ids)))
 
     def connect_once(self):
         sio = self._open_socketio()
@@ -324,13 +315,16 @@ class IPokerWorker:
             self.set(authenticated=True)
             logger.info("ChampionPoker PokerLoginResponse accepted (60109)")
 
-            request_id = "Lobby_FilterSubscription_" + uuid.uuid4().hex
-            self._send(build_tournament_subscription(request_id=request_id))
-            ack = self._wait_for({50018}, timeout=25, check_error=True)
+            subscription = build_tournament_subscription()
+            request_id = subscription["requestId"]
+            self._send(subscription)
+            # Browser frames echo Lobby_FilterSubscription_7 in the first
+            # TournamentPush (classId 40001). Also accept an explicit 50018 ack.
+            ack = self._wait_for({40001, 50018}, timeout=35, check_error=True, request_id=request_id)
             self.set(subscribed=True)
             logger.info(
-                "Scheduled tournament filter subscription accepted (50018); request_id_matches=%s",
-                ack.get("requestId") == request_id,
+                "Scheduled tournament subscription active: response_class=%s request_id_matches=true",
+                self._class_id(ack),
             )
 
             next_ping = time.monotonic() + 25
