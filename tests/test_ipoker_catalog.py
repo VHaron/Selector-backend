@@ -27,7 +27,7 @@ def test_native_championpoker_tournament_shape():
     assert item["total_buyin"] == 6.8
     assert item["currency"] == "EUR"
     assert item["is_knockout"] is True
-    assert item["is_pko"] is None  # Not inferred from bounty fee alone.
+    assert item["is_pko"] is True  # Positive progression factor identifies PKO.
     assert item["time_start"].startswith("2026-11-")
     assert item["raw"] == raw
 
@@ -80,3 +80,20 @@ def test_live_40001_partial_tournament_maps_original_date_and_translation():
     assert item["time_start"].startswith("2026-11-")
     assert item["promo_tags"] == ["Guaranteed Tournaments", "Schedule"]
     assert item["raw"] == raw
+
+
+def test_mystery_bounty_is_not_classified_as_pko():
+    raw = {
+        "containerId": 321,
+        "tournamentGrid": {
+            "nameTranslationsList": [{"lang": "EN", "value": "Mystery Bounty"}],
+            "originalStartDate": 1795644661000,
+            "knockOutFee": 4.55,
+            "knockOutProgressionFactor": 0,
+            "mysteryBountyTournament": True,
+        },
+    }
+    item = normalize_tournament(raw)
+    assert item["is_knockout"] is True
+    assert item["is_mystery_bounty"] is True
+    assert item["is_pko"] is False
