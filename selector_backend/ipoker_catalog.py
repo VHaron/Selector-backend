@@ -115,6 +115,30 @@ def normalize_tournament(raw: dict[str, Any]) -> dict[str, Any]:
         buyin + fee if isinstance(buyin, (int, float)) and isinstance(fee, (int, float)) else buyin
     )
     currency = _first(grid, "cur", "currency", "currencyCode", "buyInCurrency")
+    display_name = str(
+        _first(grid, "name", "tournamentName", "title", "displayName")
+        or _translated_name(_first(grid, "nameTranslationsList"))
+        or "iPoker tournament"
+    )
+    # 40001 currently omits numeric buy-in/currency for many lobby rows.
+    # Recover a buy-in only when the name starts with an unambiguous amount
+    # (including schedule labels such as E4|€0.50 ...). Never infer from
+    # embedded satellite target amounts like "1x€2".
+    import re
+    amount_match = re.search(
+        r"(?:^|\\|)\\s*(€|\\$|£)\\s*(\\d+(?:[.,]\\d{1,2})?)",
+        display_name,
+    )
+    currency_symbols = {"€": "EUR", "$": "USD", "£": "GBP"}
+    if currency is None and amount_match:
+        currency = currency_symbols[amount_match.group(1)]
+    if buyin is None and amount_match:
+        buyin = float(amount_match.group(2).replace(",", "."))
+        buyin_source = "tournament_name_prefix"
+    else:
+        buyin_source = "upstream_field" if buyin is not None else None
+    if total_buyin is None and buyin is not None and fee is None:
+        total_buyin = buyin
     knockout_fee = _first(grid, "knockOutFee", "knockoutFee")
     progression = _first(grid, "knockOutProgressionFactor")
 
@@ -135,14 +159,11 @@ def normalize_tournament(raw: dict[str, Any]) -> dict[str, Any]:
         "source": "ipoker",
         "room": "ChampionPoker",
         "room_id": "247",
-        "name": str(
-            _first(grid, "name", "tournamentName", "title", "displayName")
-            or _translated_name(_first(grid, "nameTranslationsList"))
-            or "iPoker tournament"
-        ),
+        "name": display_name,
         "time_start": str(start or ""),
         "start_date_ms": start_ms,
         "buyin": buyin,
+        "buyin_source": buyin_source,
         "fee": fee,
         "total_buyin": total_buyin,
         "currency": currency,
