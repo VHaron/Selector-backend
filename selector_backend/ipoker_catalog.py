@@ -64,6 +64,28 @@ def _as_bool(value: Any) -> bool | None:
     return None
 
 
+def _translated_name(value: Any) -> str | None:
+    """Extract a display name from the native iPoker nameTranslationsList."""
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, list):
+        return None
+    entries = [item for item in value if isinstance(item, dict)]
+    if not entries:
+        return None
+    # Prefer English while retaining a deterministic fallback to first translation.
+    for item in entries:
+        language = str(_first(item, "lang", "language", "languageCode", default="")).lower()
+        text = _first(item, "value", "name", "text")
+        if text is not None and language in {"en", "eng", "english"}:
+            return str(text)
+    for item in entries:
+        text = _first(item, "value", "name", "text")
+        if text is not None:
+            return str(text)
+    return None
+
+
 def normalize_tournament(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalize the observed native ChampionPoker container; preserve raw values."""
     grid = raw.get("tournamentGrid") if isinstance(raw.get("tournamentGrid"), dict) else raw
@@ -72,7 +94,15 @@ def normalize_tournament(raw: dict[str, Any]) -> dict[str, Any]:
         stable = json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str)
         upstream_id = hashlib.sha256(stable.encode("utf-8")).hexdigest()[:20]
 
-    start_ms = _first(grid, "startDate", "startDateTime", "startTime", "start_time", "scheduledStart")
+    start_ms = _first(
+        grid,
+        "startDate",
+        "startDateTime",
+        "startTime",
+        "start_time",
+        "scheduledStart",
+        "originalStartDate",
+    )
     start = start_ms
     if isinstance(start_ms, (int, float)):
         timestamp = start_ms / 1000 if start_ms > 10_000_000_000 else start_ms
@@ -99,7 +129,11 @@ def normalize_tournament(raw: dict[str, Any]) -> dict[str, Any]:
         "source": "ipoker",
         "room": "ChampionPoker",
         "room_id": "247",
-        "name": str(_first(grid, "name", "tournamentName", "title", "displayName", default="iPoker tournament")),
+        "name": str(
+            _first(grid, "name", "tournamentName", "title", "displayName")
+            or _translated_name(_first(grid, "nameTranslationsList"))
+            or "iPoker tournament"
+        ),
         "time_start": str(start or ""),
         "start_date_ms": start_ms,
         "buyin": buyin,
@@ -121,7 +155,7 @@ def normalize_tournament(raw: dict[str, Any]) -> dict[str, Any]:
         "buyin_type": _first(grid, "buyInType"),
         "prize_type": _first(grid, "prizeType"),
         "tournament_type": _first(grid, "tournamentType"),
-        "promo_tags": _first(grid, "promoTags", default=[]),
+        "promo_tags": _first(grid, "promoTags", "tagList", default=[]),
         "is_pko": pko,
         "is_knockout": is_knockout,
         "knockout_fee": knockout_fee,
